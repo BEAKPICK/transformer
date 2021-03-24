@@ -3,7 +3,7 @@ warnings.filterwarnings('ignore')   # if you remove it, warning of the corrupt f
 
 import mxnet as mx
 import gluonnlp as nlp
-import hyperparameters as hparams
+import hyperparameters_gluon as hparams
 
 ctx = mx.cpu()
 
@@ -51,9 +51,9 @@ def preprocess():
     '''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
     map the sentences' word tokens to ids based on the vocabulary we load
     '''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
-    import dataprocessor
+    import dataprocessor_gluon
 
-    wmt_transform_fn = dataprocessor.TrainValDataTransform(wmt_src_vocab, wmt_tgt_vocab)
+    wmt_transform_fn = dataprocessor_gluon.TrainValDataTransform(wmt_src_vocab, wmt_tgt_vocab)
     # now you can custom your model through this preprocessed data
     wmt_dataset_processed = wmt_data_test.transform(wmt_transform_fn, lazy=False)
     print(*wmt_dataset_processed[0], sep='\n')

@@ -24,7 +24,7 @@ import mxnet as mx
 from mxnet import gluon
 import gluonnlp as nlp
 import nmt
-import hyperparameters as hparams
+import hyperparameters_gluon as hparams
 
 def cache_dataset(dataset, prefix):
     """Cache the processed npy dataset the dataset into a npz

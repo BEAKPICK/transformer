@@ -11,8 +11,8 @@ import gluonnlp as nlp
 from mxnet import gluon
 
 from nmt import translation, bleu
-import preprocess as pp
-import hyperparameters as hparams
+import preprocess_gluon as pp
+import hyperparameters_gluon as hparams
 
 wmt_data_test_with_len, wmt_transformer_model, wmt_src_vocab, wmt_tgt_vocab, wmt_test_tgt_sentences = pp.preprocess()
 

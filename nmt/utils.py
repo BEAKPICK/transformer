@@ -21,9 +21,9 @@ import math
 import mxnet as mx
 import time
 import logging
-import io
 import nmt
-import hyperparameters as hparams
+from gluon import hyperparameters_gluon as hparams
+
 
 def evaluate(model, data_loader, test_loss_function, translator, tgt_vocab, detokenizer, context):
     """Evaluate given the data loader
