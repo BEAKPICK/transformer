@@ -30,7 +30,7 @@ preparing data and environment
 
 # torchtext==0.6.0
 '''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+device = torch.device('cuda:1' if torch.cuda.is_available() else 'cpu')
 
 spacy_en = spacy.load('en_core_web_sm')
 spacy_de = spacy.load('de_core_news_sm')
@@ -54,9 +54,12 @@ TRG = Field(tokenize=tokenize_de,
             lower=True,
             batch_first=True)
 
+st = utils.time.time()
 train, valid, test = torchtext.datasets.WMT14.splits(exts=('.en', '.de'),
                                                      fields=(SRC, TRG))
-
+et = utils.time.time()
+m, s = utils.epoch_time(st, et)
+print(f'data split completed | time : {m}m {s}s')
 # utils.save_pickle(train, 'train.pkl')
 # utils.save_pickle(valid, 'valid.pkl')
 # utils.save_pickle(test, 'test.pkl')
@@ -77,10 +80,16 @@ train, valid, test = torchtext.datasets.WMT14.splits(exts=('.en', '.de'),
 #     TRG.build_vocab(train)
 #     print("TRG build success")
 
+st = utils.time.time()
 SRC.build_vocab(train)
-print("SRC build success")
+et = utils.time.time()
+m, s = utils.epoch_time(st, et)
+print("SRC build success | time : {m}m {s}s")
+st = utils.time.time()
 TRG.build_vocab(train)
-print("TRG build success")
+et = utils.time.time()
+m, s = utils.epoch_time(st, et)
+print("TRG build success | time : {m}m {s}s")
 
 # make sure mark them if you have SRC, TRG saved
 # utils.save_vocab(SRC.vocab, 'src_vocab.txt')
