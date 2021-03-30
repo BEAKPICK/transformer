@@ -12,9 +12,12 @@ https://github.com/ndb796/Deep-Learning-Paper-Review-and-Practice/blob/master/co
 imports
 '''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
 import torch
+import torch.optim as optim
+import torch.nn as nn
+
 import torchtext
 from torchtext.data import Field, BucketIterator
-import torch.nn as nn
+
 import numpy as np
 import spacy # for tokenizer
 
@@ -25,7 +28,7 @@ import customutils_pytorch as utils
 '''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
 preparing data and environment
 
-# since we are planning to use GPU CUDA 10.1, torchtext==0.6.0
+# torchtext==0.6.0
 '''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
@@ -434,8 +437,14 @@ model = Transformer(encoder=enc,
 print(f'The model has {utils.count_parameters(model):,} trainable parameters')
 model.apply(utils.initalize_weights)
 
-# set optimizer and loss function
-optimizer = torch.optim.Adam(model.parameters(), lr=hparams.learning_rate)
+# set optimizer, scheduler and loss function
+optimizer = torch.optim.Adam(model.parameters(), betas=(0.9, 0.98), lr=hparams.learning_rate)
+warmup_steps = 4000
+scheduler = optim.lr_scheduler.LambdaLR(optimizer=optimizer,
+                                        lr_lambda=lambda epoch:(hparams.d_model**(-0.5))*min(epoch**(-0.5), epoch*warmup_steps**(-1.5)),
+                                        last_epoch=-1,
+                                        verbose=True)
+
 loss_fn = nn.CrossEntropyLoss(ignore_index=TRG_PAD_IDX)
 
 # train and evaluate function
@@ -468,6 +477,7 @@ def train(model, iterator, optimizer, loss_fn):
 
         # parameter update
         optimizer.step()
+        scheduler.step()
 
         # total loss in each epochs
         epoch_loss += float(loss.item())
