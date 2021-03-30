@@ -30,6 +30,12 @@ MANIFEST
 # custom
 torchtext/
 .data/
+*.pkl
+*.model*
+*.txt
+*.pt
+gluon_type/
+nmt/
 
 # PyInstaller
 #  Usually these files are written by a python script from a template

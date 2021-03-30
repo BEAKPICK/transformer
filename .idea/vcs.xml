@@ -4,5 +4,8 @@
     <mapping directory="$PROJECT_DIR$" vcs="Git" />
     <mapping directory="$PROJECT_DIR$/text" vcs="Git" />
     <mapping directory="$PROJECT_DIR$/torchtext" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/torchtext/third_party/double-conversion" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/torchtext/third_party/re2" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/torchtext/third_party/sentencepiece" vcs="Git" />
   </component>
 </project>

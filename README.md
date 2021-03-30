@@ -1,4 +1,5 @@
 # transformer
 attention is all you need
 
-*need to download torchtext
+pytorch=1.7.1\
+torchtext = 0.6.0
