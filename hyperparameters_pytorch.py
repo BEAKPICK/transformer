@@ -5,7 +5,7 @@ n_heads =  8
 n_encoder = 8
 n_decoder = 8
 d_ff = 2048
-batch_size = 128
+batch_size = 40
 
 dropout_ratio = 0.1
 learning_rate = 0.0005

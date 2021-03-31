@@ -134,12 +134,12 @@ trg_embed_mtrx = torch.randn(trg_vocabsize, hparams.d_model).to(device)
 for i in range(src_vocabsize):
     word = list(SRC.vocab.stoi.keys())[i]
     if word in src_word2vec.wv.index2word:
-        src_embed_mtrx[SRC.vocab.stoi[word]] = torch.tensor(src_word2vec.wv[word]).to(device)
+        src_embed_mtrx[SRC.vocab.stoi[word]] = torch.tensor(src_word2vec.wv[word].copy()).to(device)
 
 for i in range(trg_vocabsize):
     word = list(TRG.vocab.stoi.keys())[i]
     if word in trg_word2vec.wv.index2word:
-        trg_embed_mtrx[TRG.vocab.stoi[word]] = torch.tensor(trg_word2vec.wv[word]).to(device)
+        trg_embed_mtrx[TRG.vocab.stoi[word]] = torch.tensor(trg_word2vec.wv[word].copy()).to(device)
 
 '''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
 positional encoding
@@ -215,10 +215,10 @@ class PositionwiseFeedforwardLayer(nn.Module):
     def __init__(self, d_model, d_ff, dropout_ratio):
         super().__init__()
 
-        self.w_ff1 = nn.Linear(d_model, d_ff).to(self.device)
-        self.w_ff2 = nn.Linear(d_ff, d_model).to(self.device)
+        self.w_ff1 = nn.Linear(d_model, d_ff)
+        self.w_ff2 = nn.Linear(d_ff, d_model)
 
-        self.dropout = nn.Dropout(dropout_ratio).to(self.device)
+        self.dropout = nn.Dropout(dropout_ratio)
 
     def forward(self, x):
         # x: [batch_size, seq_len, d_model]
@@ -427,6 +427,56 @@ class Transformer(nn.Module):
         # attention: [batch_size, n_heads, trg_len, src_len]
         return output, attention
 
+'''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
+bleu score
+'''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
+from torchtext.data.metrics import bleu_score
+
+def show_bleu(data, SRC, TRG, model, device, max_len=50):
+    trgs = []
+    pred_trgs = []
+    index = 0
+
+    for datum in data:
+        src = vars(datum)['src']
+        trg = vars(datum)['trg']
+
+        pred_trg, _ = translate_sentence(src, SRC, TRG, model, device, max_len, logging=False)
+
+        # remove <eos>
+        pred_trg = pred_trg[:-1]
+
+        pred_trgs.append(pred_trg)
+        trgs.append([trg])
+
+        index+=1
+        if (index + 1) % 100 == 0:
+            print(f'[{index+1}/{len(data)}]')
+            print(f'pred: {pred_trg}')
+            print(f'answer: {trg}')
+    bleu = bleu_score(pred_trgs, trgs, max_n=4, weights=[0.25, 0.25, 0.25, 0.25])
+    print(f'Total BLEU Score = {bleu*100:.2f}')
+
+    # individual_bleu1_score = bleu_score(pred_trgs, trgs, max_n=4, weights=[1,0,0,0])
+    # individual_bleu2_score = bleu_score(pred_trgs, trgs, max_n=4, weights=[0,1,0,0])
+    # individual_bleu3_score = bleu_score(pred_trgs, trgs, max_n=4, weights=[0,0,1,0])
+    # individual_bleu4_score = bleu_score(pred_trgs, trgs, max_n=4, weights=[0,0,0,1])
+    #
+    # cumulative_bleu1_score = bleu_score(pred_trgs, trgs, max_n=4, weights=[1,0,0,0])
+    # cumulative_bleu2_score = bleu_score(pred_trgs, trgs, max_n=4, weights=[1/2,1/2,0,0])
+    # cumulative_bleu3_score = bleu_score(pred_trgs, trgs, max_n=4, weights=[1/3,1/3,1/3,0])
+    # cumulative_bleu4_score = bleu_score(pred_trgs, trgs, max_n=4, weights=[1/4,1/4,1/4,1/4])
+    #
+    # print(f'Individual BLEU1 score = {individual_bleu1_score * 100:.2f}')
+    # print(f'Individual BLEU2 score = {individual_bleu2_score * 100:.2f}')
+    # print(f'Individual BLEU3 score = {individual_bleu3_score * 100:.2f}')
+    # print(f'Individual BLEU4 score = {individual_bleu4_score * 100:.2f}')
+    #
+    # print(f'Cumulative BLEU1 score = {cumulative_bleu1_score * 100:.2f}')
+    # print(f'Cumulative BLEU2 score = {cumulative_bleu2_score * 100:.2f}')
+    # print(f'Cumulative BLEU3 score = {cumulative_bleu3_score * 100:.2f}')
+    # print(f'Cumulative BLEU4 score = {cumulative_bleu4_score * 100:.2f}')
+
 '''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
 Preparing for Training
 '''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
@@ -472,14 +522,20 @@ warmup_steps = 4000
 scheduler = optim.lr_scheduler.LambdaLR(optimizer=optimizer,
                                         lr_lambda=lambda steps:(hparams.d_model**(-0.5))*min((steps+1)**(-0.5), (steps+1)*warmup_steps**(-1.5)),
                                         last_epoch=-1,
-                                        verbose=True)
+                                        verbose=False)
 
 loss_fn = nn.CrossEntropyLoss(ignore_index=TRG_PAD_IDX)
 
 # train and evaluate function
-def train(model, iterator, optimizer, loss_fn):
+# since working enviornment takes too long to complete 1 epoch, make frequent log and save parted by default 5
+def train(model, iterator, optimizer, loss_fn, part=5):
+
+    total_length = len(train.examples)
+    current_part = 1
     model.train()
     epoch_loss = 0
+
+    part_start_time = utils.time.time()
 
     for i, batch in enumerate(iterator):
         src = batch.src
@@ -511,8 +567,29 @@ def train(model, iterator, optimizer, loss_fn):
         # total loss in each epochs
         epoch_loss += float(loss.item())
 
+        if (current_part * i) > current_part * (total_length / part):
+            part_end_time = utils.time.time()
+            part_mins, part_secs = utils.epoch_time(part_start_time, part_end_time)
+
+            print(f'{i} / {total_length},   part {current_part} / {part} complete... {part_mins}m {part_secs}s ', sep='')
+            valid_loss = evaluate(model, valid_iterator, loss_fn)
+            if valid_loss < best_valid_loss:
+                best_valid_loss = valid_loss
+                torch.save(model.state_dict(), 'transformer_en_de.pt')
+                print('model saved')
+            print(f'Part Train Loss: {epoch_loss / i:.3f} | Part Train PPL: {utils.math.exp(epoch_loss / i):.3f}')
+            print(f'Validation Loss: {valid_loss:.3f} | Validation PPL: {utils.math.exp(valid_loss):.3f}')
+            show_bleu(test, SRC, TRG, model, device)
+
+            current_part += 1
+            print('\n', sep='')
+            part_start_time = utils.time.time()
+
     return epoch_loss / len(iterator)
 
+'''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
+Evaluation
+'''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
 def evaluate(model, iterator, loss_fn):
     model.eval()
     epoch_loss = 0
@@ -563,6 +640,7 @@ for epoch in range(hparams.n_epochs):
     print(f'Epoch: {epoch+1:03} Time: {epoch_mins}m {epoch_secs}s')
     print(f'Train Loss: {train_loss:.3f} Train PPL: {utils.math.exp(train_loss):.3f}')
     print(f'Validation Loss: {valid_loss:.3f} Validation PPL: {utils.math.exp(valid_loss):.3f}')
+    print('\n')
 
 '''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
 generation
@@ -626,54 +704,6 @@ translation, attention = translate_sentence(sentence=src,
                                             device=device)
 print('result :', ' '.join(translation))
 
-'''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
-bleu score
-'''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
-from torchtext.data.metrics import bleu_score
 
-def show_bleu(data, SRC, TRG, model, device, max_len=50):
-    trgs = []
-    pred_trgs = []
-    index = 0
-
-    for datum in data:
-        src = vars(datum)['src']
-        trg = vars(datum)['trg']
-
-        pred_trg, _ = translate_sentence(src, SRC, TRG, model, device, max_len, logging=False)
-
-        # remove <eos>
-        pred_trg = pred_trg[:-1]
-
-        pred_trgs.append(pred_trg)
-        trgs.append([trg])
-
-        index+=1
-        if (index + 1) % 100 == 0:
-            print(f'[{index+1}/{len(data)}]')
-            print(f'pred: {pred_trg}')
-            print(f'answer: {trg}')
-    bleu = bleu_score(pred_trgs, trgs, max_n=4, weights=[0.25, 0.25, 0.25, 0.25])
-    print(f'Total BLEU Score = {bleu*100:.2f}')
-
-    # individual_bleu1_score = bleu_score(pred_trgs, trgs, max_n=4, weights=[1,0,0,0])
-    # individual_bleu2_score = bleu_score(pred_trgs, trgs, max_n=4, weights=[0,1,0,0])
-    # individual_bleu3_score = bleu_score(pred_trgs, trgs, max_n=4, weights=[0,0,1,0])
-    # individual_bleu4_score = bleu_score(pred_trgs, trgs, max_n=4, weights=[0,0,0,1])
-    #
-    # cumulative_bleu1_score = bleu_score(pred_trgs, trgs, max_n=4, weights=[1,0,0,0])
-    # cumulative_bleu2_score = bleu_score(pred_trgs, trgs, max_n=4, weights=[1/2,1/2,0,0])
-    # cumulative_bleu3_score = bleu_score(pred_trgs, trgs, max_n=4, weights=[1/3,1/3,1/3,0])
-    # cumulative_bleu4_score = bleu_score(pred_trgs, trgs, max_n=4, weights=[1/4,1/4,1/4,1/4])
-    #
-    # print(f'Individual BLEU1 score = {individual_bleu1_score * 100:.2f}')
-    # print(f'Individual BLEU2 score = {individual_bleu2_score * 100:.2f}')
-    # print(f'Individual BLEU3 score = {individual_bleu3_score * 100:.2f}')
-    # print(f'Individual BLEU4 score = {individual_bleu4_score * 100:.2f}')
-    #
-    # print(f'Cumulative BLEU1 score = {cumulative_bleu1_score * 100:.2f}')
-    # print(f'Cumulative BLEU2 score = {cumulative_bleu2_score * 100:.2f}')
-    # print(f'Cumulative BLEU3 score = {cumulative_bleu3_score * 100:.2f}')
-    # print(f'Cumulative BLEU4 score = {cumulative_bleu4_score * 100:.2f}')
 
 show_bleu(test, SRC, TRG, model, device)
