@@ -162,7 +162,7 @@ Self Attention
 class MultiHeadAttentionLayer(nn.Module):
     def __init__(self, d_k, d_v, d_model, n_heads, dropout_ratio, device):
         super().__init__()
-
+        self.device = device
         # since d_v * n_heads = d_model in the paper,
         assert d_model % n_heads == 0
 
@@ -171,13 +171,13 @@ class MultiHeadAttentionLayer(nn.Module):
         self.d_model = d_model
         self.n_heads = n_heads
 
-        self.w_q = nn.Linear(d_model, d_k * n_heads)
-        self.w_k = nn.Linear(d_model, d_k * n_heads)
-        self.w_v = nn.Linear(d_model, d_v * n_heads)
+        self.w_q = nn.Linear(d_model, d_k * n_heads).to(self.device)
+        self.w_k = nn.Linear(d_model, d_k * n_heads).to(self.device)
+        self.w_v = nn.Linear(d_model, d_v * n_heads).to(self.device)
 
-        self.w_o = nn.Linear(d_v * n_heads, d_model)
+        self.w_o = nn.Linear(d_v * n_heads, d_model).to(self.device)
 
-        self.dropout = nn.Dropout(dropout_ratio)
+        self.dropout = nn.Dropout(dropout_ratio).to(self.device)
         self.scale = torch.sqrt(torch.FloatTensor([self.d_k])).to(self.device)
 
     def forward(self, query, key, value, mask=None):
@@ -215,10 +215,10 @@ class PositionwiseFeedforwardLayer(nn.Module):
     def __init__(self, d_model, d_ff, dropout_ratio):
         super().__init__()
 
-        self.w_ff1 = nn.Linear(d_model, d_ff)
-        self.w_ff2 = nn.Linear(d_ff, d_model)
+        self.w_ff1 = nn.Linear(d_model, d_ff).to(self.device)
+        self.w_ff2 = nn.Linear(d_ff, d_model).to(self.device)
 
-        self.dropout = nn.Dropout(dropout_ratio)
+        self.dropout = nn.Dropout(dropout_ratio).to(self.device)
 
     def forward(self, x):
         # x: [batch_size, seq_len, d_model]
@@ -241,12 +241,12 @@ class TransformerEncoderLayer(nn.Module):
                                                        n_heads=n_heads,
                                                        dropout_ratio=dropout_ratio,
                                                        device=device).to(device)
-        self.self_attn_layer_norm = nn.LayerNorm(d_model)
+        self.self_attn_layer_norm = nn.LayerNorm(d_model).to(device)
         self.positionwise_ff_layer = PositionwiseFeedforwardLayer(d_model=d_model,
                                                                   d_ff=d_ff,
                                                                   dropout_ratio=dropout_ratio).to(device)
-        self.positionwise_ff_layer_norm = nn.LayerNorm(d_model)
-        self.dropout = nn.Dropout(dropout_ratio)
+        self.positionwise_ff_layer_norm = nn.LayerNorm(d_model).to(device)
+        self.dropout = nn.Dropout(dropout_ratio).to(device)
 
     def forward(self, src, src_mask):
         # src: [batch_size, src_len, d_model]
@@ -269,15 +269,15 @@ class TransformerEncoder(nn.Module):
 
         self.device = device
 
-        self.tok_embedding = nn.Embedding(input_dim, d_model).from_pretrained(src_embed_mtrx).requires_grad_(False)
+        self.tok_embedding = nn.Embedding(input_dim, d_model).from_pretrained(src_embed_mtrx).requires_grad_(False).to(self.device)
         self.layers = nn.ModuleList([TransformerEncoderLayer(d_k=d_k,
                                                              d_v=d_v,
                                                              d_model=d_model,
                                                              n_heads=n_heads,
                                                              d_ff=d_ff,
                                                              dropout_ratio=dropout_ratio,
-                                                             device=device) for _ in range(n_layers)])
-        self.dropout = nn.Dropout(dropout_ratio)
+                                                             device=device) for _ in range(n_layers)]).to(self.device)
+        self.dropout = nn.Dropout(dropout_ratio).to(self.device)
         self.scale = torch.sqrt(torch.FloatTensor([d_k])).to(self.device)
 
     def forward(self, src, src_mask):
@@ -301,31 +301,31 @@ TransformerDecoderLayer
 class TransformerDecoderLayer(nn.Module):
     def __init__(self, d_k, d_v, d_model, n_heads, d_ff, dropout_ratio, device):
         super().__init__()
-
+        self.device = device
         self.self_attn_layer = MultiHeadAttentionLayer(d_k=d_k,
                                                        d_v=d_v,
                                                        d_model=d_model,
                                                        n_heads=n_heads,
                                                        dropout_ratio=dropout_ratio,
-                                                       device=device).to(device)
+                                                       device=device).to(self.device)
 
-        self.self_attn_layer_norm = nn.LayerNorm(d_model)
+        self.self_attn_layer_norm = nn.LayerNorm(d_model).to(self.device)
 
         self.enc_dec_attn_layer = MultiHeadAttentionLayer(d_k=d_k,
                                                           d_v=d_v,
                                                           d_model=d_model,
                                                           n_heads=n_heads,
                                                           dropout_ratio=dropout_ratio,
-                                                          device=device).to(device)
+                                                          device=device).to(self.device)
 
-        self.enc_dec_attn_layer_norm = nn.LayerNorm(d_model)
+        self.enc_dec_attn_layer_norm = nn.LayerNorm(d_model).to(self.device)
 
         self.positionwise_ff_layer = PositionwiseFeedforwardLayer(d_model=d_model,
                                                                   d_ff=d_ff,
-                                                                  dropout_ratio=dropout_ratio).to(device)
-        self.positionwise_ff_layer_norm = nn.LayerNorm(d_model)
+                                                                  dropout_ratio=dropout_ratio).to(self.device)
+        self.positionwise_ff_layer_norm = nn.LayerNorm(d_model).to(self.device)
 
-        self.dropout = nn.Dropout(dropout_ratio)
+        self.dropout = nn.Dropout(dropout_ratio).to(self.device)
 
     def forward(self, trg, enc_src, trg_mask, src_mask):
         # trg: [batch_size, trg_len, d_model]
@@ -358,9 +358,9 @@ class TransformerDecoder(nn.Module):
                                                              n_heads=n_heads,
                                                              d_ff=d_ff,
                                                              dropout_ratio=dropout_ratio,
-                                                             device=device) for _ in range(n_layers)])
-        self.affine = nn.Linear(d_model, output_dim)
-        self.dropout = nn.Dropout(dropout_ratio)
+                                                             device=device) for _ in range(n_layers)]).to(self.device)
+        self.affine = nn.Linear(d_model, output_dim).to(self.device)
+        self.dropout = nn.Dropout(dropout_ratio).to(self.device)
         self.scale = torch.sqrt(torch.FloatTensor([d_k])).to(self.device)
 
     def forward(self, trg, enc_src, trg_mask, src_mask):
@@ -445,7 +445,7 @@ enc = TransformerEncoder(input_dim=INPUT_DIM,
                          n_heads=hparams.n_heads,
                          d_ff=hparams.d_ff,
                          dropout_ratio=hparams.dropout_ratio,
-                         device=device)
+                         device=device).to(device)
 
 dec = TransformerDecoder(output_dim=OUTPUT_DIM,
                          d_k=hparams.d_k,
@@ -455,7 +455,7 @@ dec = TransformerDecoder(output_dim=OUTPUT_DIM,
                          n_heads=hparams.n_heads,
                          d_ff=hparams.d_ff,
                          dropout_ratio=hparams.dropout_ratio,
-                         device=device)
+                         device=device).to(device)
 
 model = Transformer(encoder=enc,
                     decoder=dec,
