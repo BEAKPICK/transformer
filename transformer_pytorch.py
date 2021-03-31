@@ -84,12 +84,12 @@ st = utils.time.time()
 SRC.build_vocab(train)
 et = utils.time.time()
 m, s = utils.epoch_time(st, et)
-print("SRC build success | time : {m}m {s}s")
+print(f"SRC build success | time : {m}m {s}s")
 st = utils.time.time()
 TRG.build_vocab(train)
 et = utils.time.time()
 m, s = utils.epoch_time(st, et)
-print("TRG build success | time : {m}m {s}s")
+print(f"TRG build success | time : {m}m {s}s")
 
 # make sure mark them if you have SRC, TRG saved
 # utils.save_vocab(SRC.vocab, 'src_vocab.txt')
@@ -158,7 +158,7 @@ class MultiHeadAttentionLayer(nn.Module):
         self.w_o = nn.Linear(d_v * n_heads, d_model)
 
         self.dropout = nn.Dropout(dropout_ratio)
-        self.scale = torch.sqrt(torch.FloatTensor([self.d_k])).to(device)
+        self.scale = torch.sqrt(torch.FloatTensor([self.d_k])).to(self.device)
 
     def forward(self, query, key, value, mask=None):
         batch_size = query.shape[0]
@@ -249,7 +249,7 @@ class TransformerEncoder(nn.Module):
 
         self.device = device
 
-        self.tok_embedding = nn.Embedding(input_dim, d_model)
+        self.tok_embedding = nn.Embedding(input_dim, d_model).requires_grad_(False)
         self.layers = nn.ModuleList([TransformerEncoderLayer(d_k=d_k,
                                                              d_v=d_v,
                                                              d_model=d_model,
@@ -258,7 +258,7 @@ class TransformerEncoder(nn.Module):
                                                              dropout_ratio=dropout_ratio,
                                                              device=device) for _ in range(n_layers)])
         self.dropout = nn.Dropout(dropout_ratio)
-        self.scale = torch.sqrt(torch.FloatTensor([d_k])).to(device)
+        self.scale = torch.sqrt(torch.FloatTensor([d_k])).to(self.device)
 
     def forward(self, src, src_mask):
         batch_size =src.shape[0]
@@ -268,7 +268,7 @@ class TransformerEncoder(nn.Module):
         # pos = torch.arange(0, src_len).unsqueeze(0).repeat(batch_size, 1).to(self.device)
         src = self.dropout(self.tok_embedding(src))
         # +positional encoding
-        src += torch.FloatTensor(get_sinusoid_encoding_table(src_len, src.shape[2])).to(device)
+        src += torch.FloatTensor(get_sinusoid_encoding_table(src_len, src.shape[2])).to(self.device)
         # src: [batch_size, src_len, d_model]
         for layer in self.layers:
             src = layer(src, src_mask)
@@ -331,7 +331,7 @@ class TransformerDecoder(nn.Module):
         super().__init__()
         self.device = device
 
-        self.tok_embedding = nn.Embedding(output_dim, d_model)
+        self.tok_embedding = nn.Embedding(output_dim, d_model).requires_grad_(False)
         self.layers = nn.ModuleList([TransformerDecoderLayer(d_k=d_k,
                                                              d_v=d_v,
                                                              d_model=d_model,
@@ -341,7 +341,7 @@ class TransformerDecoder(nn.Module):
                                                              device=device) for _ in range(n_layers)])
         self.affine = nn.Linear(d_model, output_dim)
         self.dropout = nn.Dropout(dropout_ratio)
-        self.scale = torch.sqrt(torch.FloatTensor([d_k])).to(device)
+        self.scale = torch.sqrt(torch.FloatTensor([d_k])).to(self.device)
 
     def forward(self, trg, enc_src, trg_mask, src_mask):
         batch_size = trg.shape[0]
@@ -351,7 +351,7 @@ class TransformerDecoder(nn.Module):
         # pos: [batch_size, trg_len]
         trg = self.dropout(self.tok_embedding(trg))
         # +positional encoding
-        trg += torch.FloatTensor(get_sinusoid_encoding_table(trg_len, trg.shape[2])).to(device)
+        trg += torch.FloatTensor(get_sinusoid_encoding_table(trg_len, trg.shape[2])).to(self.device)
         # trg: [batch_size, trg_len, d_model]
 
         for layer in self.layers:
