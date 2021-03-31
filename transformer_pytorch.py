@@ -528,7 +528,7 @@ loss_fn = nn.CrossEntropyLoss(ignore_index=TRG_PAD_IDX)
 
 # train and evaluate function
 # since working enviornment takes too long to complete 1 epoch, make frequent log and save parted by default 5
-def train(model, iterator, optimizer, loss_fn, part=5):
+def train_model(model, iterator, optimizer, loss_fn, part=5):
 
     total_length = len(train.examples)
     current_part = 1
@@ -567,12 +567,12 @@ def train(model, iterator, optimizer, loss_fn, part=5):
         # total loss in each epochs
         epoch_loss += float(loss.item())
 
-        if (current_part * i) > current_part * (total_length / part):
+        if (current_part * i) > (current_part * (total_length / part)):
             part_end_time = utils.time.time()
             part_mins, part_secs = utils.epoch_time(part_start_time, part_end_time)
 
-            print(f'{i} / {total_length},   part {current_part} / {part} complete... {part_mins}m {part_secs}s ', sep='')
-            valid_loss = evaluate(model, valid_iterator, loss_fn)
+            print(f'{i} / {total_length}, part {current_part} / {part} complete... {part_mins}m {part_secs}s ', sep='')
+            valid_loss = evaluate_model(model, valid_iterator, loss_fn)
             if valid_loss < best_valid_loss:
                 best_valid_loss = valid_loss
                 torch.save(model.state_dict(), 'transformer_en_de.pt')
@@ -583,6 +583,7 @@ def train(model, iterator, optimizer, loss_fn, part=5):
 
             current_part += 1
             print('\n', sep='')
+            model.train()
             part_start_time = utils.time.time()
 
     return epoch_loss / len(iterator)
@@ -590,7 +591,7 @@ def train(model, iterator, optimizer, loss_fn, part=5):
 '''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
 Evaluation
 '''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
-def evaluate(model, iterator, loss_fn):
+def evaluate_model(model, iterator, loss_fn):
     model.eval()
     epoch_loss = 0
 
@@ -622,28 +623,7 @@ def evaluate(model, iterator, loss_fn):
     return epoch_loss / len(iterator)
 
 '''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
-Training
-'''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
-best_valid_loss = float('inf')
-
-for epoch in range(hparams.n_epochs):
-    start_time = utils.time.time()
-    train_loss = train(model, train_iterator, optimizer, loss_fn)
-    valid_loss = evaluate(model, valid_iterator, loss_fn)
-    end_time = utils.time.time()
-    epoch_mins, epoch_secs = utils.epoch_time(start_time, end_time)
-
-    if valid_loss < best_valid_loss:
-        best_valid_loss = valid_loss
-        torch.save(model.state_dict(), 'transformer_en_de.pt')
-
-    print(f'Epoch: {epoch+1:03} Time: {epoch_mins}m {epoch_secs}s')
-    print(f'Train Loss: {train_loss:.3f} Train PPL: {utils.math.exp(train_loss):.3f}')
-    print(f'Validation Loss: {valid_loss:.3f} Validation PPL: {utils.math.exp(valid_loss):.3f}')
-    print('\n')
-
-'''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
-generation
+Generation
 '''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
 def translate_sentence(sentence, SRC, TRG, model, device, max_len=50, logging=False):
     model.eval()
@@ -691,6 +671,30 @@ def translate_sentence(sentence, SRC, TRG, model, device, max_len=50, logging=Fa
 
     return trg_tokens[1:], attention
 
+'''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
+Training
+'''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
+best_valid_loss = float('inf')
+
+for epoch in range(hparams.n_epochs):
+    start_time = utils.time.time()
+    train_loss = train_model(model, train_iterator, optimizer, loss_fn)
+    valid_loss = evaluate_model(model, valid_iterator, loss_fn)
+    end_time = utils.time.time()
+    epoch_mins, epoch_secs = utils.epoch_time(start_time, end_time)
+
+    if valid_loss < best_valid_loss:
+        best_valid_loss = valid_loss
+        torch.save(model.state_dict(), 'transformer_en_de.pt')
+
+    print(f'Epoch: {epoch+1:03} Time: {epoch_mins}m {epoch_secs}s')
+    print(f'Train Loss: {train_loss:.3f} Train PPL: {utils.math.exp(train_loss):.3f}')
+    print(f'Validation Loss: {valid_loss:.3f} Validation PPL: {utils.math.exp(valid_loss):.3f}')
+    print('\n')
+
+'''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
+Generation Test
+'''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
 example_idx=10
 src = vars(test.examples[example_idx])['src']
 trg = vars(test.examples[example_idx])['trg']
