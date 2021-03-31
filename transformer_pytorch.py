@@ -18,6 +18,7 @@ import torch.nn as nn
 import torchtext
 from torchtext.data import Field, BucketIterator
 
+from gensim.models import Word2Vec
 import numpy as np
 import spacy # for tokenizer
 
@@ -121,6 +122,25 @@ embedding
 # encoder_embed = nn.Embedding.from_pretrained(e_embed)
 # decoder_embed = nn.Embedding.from_pretrained(d_embed)
 
+src_word2vec = Word2Vec.load('src_embedd.model')
+trg_word2vec = Word2Vec.load('trg_embedd.model')
+
+src_vocabsize = len(SRC.vocab.stoi)
+trg_vocabsize = len(TRG.vocab.stoi)
+
+src_embed_mtrx = torch.randn(src_vocabsize, hparams.d_model).to(device)
+trg_embed_mtrx = torch.randn(trg_vocabsize, hparams.d_model).to(device)
+
+for i in range(src_vocabsize):
+    word = list(SRC.vocab.stoi.keys())[i]
+    if word in src_word2vec.wv.index2word:
+        src_embed_mtrx[SRC.vocab.stoi[word]] = torch.tensor(src_word2vec.wv[word]).to(device)
+
+for i in range(trg_vocabsize):
+    word = list(TRG.vocab.stoi.keys())[i]
+    if word in trg_word2vec.wv.index2word:
+        trg_embed_mtrx[TRG.vocab.stoi[word]] = torch.tensor(trg_word2vec.wv[word]).to(device)
+
 '''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
 positional encoding
 '''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
@@ -220,11 +240,11 @@ class TransformerEncoderLayer(nn.Module):
                                                        d_model=d_model,
                                                        n_heads=n_heads,
                                                        dropout_ratio=dropout_ratio,
-                                                       device=device)
+                                                       device=device).to(device)
         self.self_attn_layer_norm = nn.LayerNorm(d_model)
         self.positionwise_ff_layer = PositionwiseFeedforwardLayer(d_model=d_model,
                                                                   d_ff=d_ff,
-                                                                  dropout_ratio=dropout_ratio)
+                                                                  dropout_ratio=dropout_ratio).to(device)
         self.positionwise_ff_layer_norm = nn.LayerNorm(d_model)
         self.dropout = nn.Dropout(dropout_ratio)
 
@@ -249,7 +269,7 @@ class TransformerEncoder(nn.Module):
 
         self.device = device
 
-        self.tok_embedding = nn.Embedding(input_dim, d_model).requires_grad_(False)
+        self.tok_embedding = nn.Embedding(input_dim, d_model).from_pretrained(src_embed_mtrx).requires_grad_(False)
         self.layers = nn.ModuleList([TransformerEncoderLayer(d_k=d_k,
                                                              d_v=d_v,
                                                              d_model=d_model,
@@ -287,7 +307,7 @@ class TransformerDecoderLayer(nn.Module):
                                                        d_model=d_model,
                                                        n_heads=n_heads,
                                                        dropout_ratio=dropout_ratio,
-                                                       device=device)
+                                                       device=device).to(device)
 
         self.self_attn_layer_norm = nn.LayerNorm(d_model)
 
@@ -296,13 +316,13 @@ class TransformerDecoderLayer(nn.Module):
                                                           d_model=d_model,
                                                           n_heads=n_heads,
                                                           dropout_ratio=dropout_ratio,
-                                                          device=device)
+                                                          device=device).to(device)
 
         self.enc_dec_attn_layer_norm = nn.LayerNorm(d_model)
 
         self.positionwise_ff_layer = PositionwiseFeedforwardLayer(d_model=d_model,
-                                                                       d_ff=d_ff,
-                                                                       dropout_ratio=dropout_ratio)
+                                                                  d_ff=d_ff,
+                                                                  dropout_ratio=dropout_ratio).to(device)
         self.positionwise_ff_layer_norm = nn.LayerNorm(d_model)
 
         self.dropout = nn.Dropout(dropout_ratio)
@@ -331,7 +351,7 @@ class TransformerDecoder(nn.Module):
         super().__init__()
         self.device = device
 
-        self.tok_embedding = nn.Embedding(output_dim, d_model).requires_grad_(False)
+        self.tok_embedding = nn.Embedding(output_dim, d_model).from_pretrained(trg_embed_mtrx).requires_grad_(False)
         self.layers = nn.ModuleList([TransformerDecoderLayer(d_k=d_k,
                                                              d_v=d_v,
                                                              d_model=d_model,
@@ -450,7 +470,7 @@ model.apply(utils.initalize_weights)
 optimizer = torch.optim.Adam(model.parameters(), betas=(0.9, 0.98), lr=hparams.learning_rate)
 warmup_steps = 4000
 scheduler = optim.lr_scheduler.LambdaLR(optimizer=optimizer,
-                                        lr_lambda=lambda epoch:(hparams.d_model**(-0.5))*min(epoch**(-0.5), epoch*warmup_steps**(-1.5)),
+                                        lr_lambda=lambda steps:(hparams.d_model**(-0.5))*min((steps+1)**(-0.5), (steps+1)*warmup_steps**(-1.5)),
                                         last_epoch=-1,
                                         verbose=True)
 
