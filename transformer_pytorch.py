@@ -22,6 +22,10 @@ from gensim.models import Word2Vec
 import numpy as np
 import spacy # for tokenizer
 
+import sys
+import os
+import os.path
+
 import preprocess_pytorch as pp # for word embeddings
 import hyperparameters_pytorch as hparams
 import customutils_pytorch as utils
@@ -31,6 +35,7 @@ preparing data and environment
 
 # torchtext==0.6.0
 '''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
+model_filepath = f'{os.getcwd()}/transformer_en_de.pt'
 device = torch.device('cuda:1' if torch.cuda.is_available() else 'cpu')
 
 spacy_en = spacy.load('en_core_web_sm')
@@ -61,6 +66,7 @@ train, valid, test = torchtext.datasets.WMT14.splits(exts=('.en', '.de'),
 et = utils.time.time()
 m, s = utils.epoch_time(st, et)
 print(f'data split completed | time : {m}m {s}s')
+sys.stdout.flush()
 # utils.save_pickle(train, 'train.pkl')
 # utils.save_pickle(valid, 'valid.pkl')
 # utils.save_pickle(test, 'test.pkl')
@@ -86,11 +92,13 @@ SRC.build_vocab(train)
 et = utils.time.time()
 m, s = utils.epoch_time(st, et)
 print(f"SRC build success | time : {m}m {s}s")
+sys.stdout.flush()
 st = utils.time.time()
 TRG.build_vocab(train)
 et = utils.time.time()
 m, s = utils.epoch_time(st, et)
 print(f"TRG build success | time : {m}m {s}s")
+sys.stdout.flush()
 
 # make sure mark them if you have SRC, TRG saved
 # utils.save_vocab(SRC.vocab, 'src_vocab.txt')
@@ -101,12 +109,17 @@ print(f"TRG build success | time : {m}m {s}s")
 
 # utils.save_pickle(SRC.vocab.stoi, 'src_stoi.pkl')
 # utils.save_pickle(TRG.vocab.stoi, 'trg_stoi.pkl')
+st = utils.time.time()
 
 train_iterator, valid_iterator, test_iterator = BucketIterator.splits(
     (train, valid, test),
     batch_size=hparams.batch_size,
     device=device)
 
+et = utils.time.time()
+m, s = utils.epoch_time(st, et)
+print(f"bucketiterator splits complete | time : {m}m {s}s")
+sys.stdout.flush()
 '''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
 embedding
 '''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
@@ -141,6 +154,7 @@ for i in range(trg_vocabsize):
     if word in trg_word2vec.wv.index2word:
         trg_embed_mtrx[TRG.vocab.stoi[word]] = torch.tensor(trg_word2vec.wv[word].copy()).to(device)
 
+print("pretrained word embeddings loaded")
 '''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
 positional encoding
 '''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
@@ -287,8 +301,11 @@ class TransformerEncoder(nn.Module):
         # to map position index information
         # pos = torch.arange(0, src_len).unsqueeze(0).repeat(batch_size, 1).to(self.device)
         src = self.dropout(self.tok_embedding(src))
+        pe = torch.FloatTensor(get_sinusoid_encoding_table(src_len, src.shape[2])).to(self.device)
         # +positional encoding
-        src += torch.FloatTensor(get_sinusoid_encoding_table(src_len, src.shape[2])).to(self.device)
+        with torch.no_grad():
+            src += pe
+        del pe
         # src: [batch_size, src_len, d_model]
         for layer in self.layers:
             src = layer(src, src_mask)
@@ -370,8 +387,11 @@ class TransformerDecoder(nn.Module):
         # pos = torch.arange(0, trg_len).unsqueeze(0).repeat(batch_size, 1).to(self.device)
         # pos: [batch_size, trg_len]
         trg = self.dropout(self.tok_embedding(trg))
+        pe = torch.FloatTensor(get_sinusoid_encoding_table(trg_len, trg.shape[2])).to(self.device)
         # +positional encoding
-        trg += torch.FloatTensor(get_sinusoid_encoding_table(trg_len, trg.shape[2])).to(self.device)
+        with torch.no_grad():
+            trg += pe 
+        del pe
         # trg: [batch_size, trg_len, d_model]
 
         for layer in self.layers:
@@ -432,7 +452,7 @@ bleu score
 '''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
 from torchtext.data.metrics import bleu_score
 
-def show_bleu(data, SRC, TRG, model, device, max_len=50):
+def show_bleu(data, SRC, TRG, model, device, logging = False, max_len=50):
     trgs = []
     pred_trgs = []
     index = 0
@@ -450,12 +470,13 @@ def show_bleu(data, SRC, TRG, model, device, max_len=50):
         trgs.append([trg])
 
         index+=1
-        if (index + 1) % 100 == 0:
+        if (index + 1) % 100 == 0 and logging:
             print(f'[{index+1}/{len(data)}]')
             print(f'pred: {pred_trg}')
             print(f'answer: {trg}')
     bleu = bleu_score(pred_trgs, trgs, max_n=4, weights=[0.25, 0.25, 0.25, 0.25])
     print(f'Total BLEU Score = {bleu*100:.2f}')
+    sys.stdout.flush()
 
     # individual_bleu1_score = bleu_score(pred_trgs, trgs, max_n=4, weights=[1,0,0,0])
     # individual_bleu2_score = bleu_score(pred_trgs, trgs, max_n=4, weights=[0,1,0,0])
@@ -513,7 +534,12 @@ model = Transformer(encoder=enc,
                     trg_pad_idx=TRG_PAD_IDX,
                     device=device).to(device)
 
+if os.path.isfile(model_filepath):
+    model.load_state_dict(torch.load(model_filepath))
+    print('model loaded from saved file')
+
 print(f'The model has {utils.count_parameters(model):,} trainable parameters')
+sys.stdout.flush()
 model.apply(utils.initalize_weights)
 
 # set optimizer, scheduler and loss function
@@ -526,11 +552,20 @@ scheduler = optim.lr_scheduler.LambdaLR(optimizer=optimizer,
 
 loss_fn = nn.CrossEntropyLoss(ignore_index=TRG_PAD_IDX)
 
-# train and evaluate function
-# since working enviornment takes too long to complete 1 epoch, make frequent log and save parted by default 5
-def train_model(model, iterator, optimizer, loss_fn, part=5):
+best_valid_loss = float('inf')
 
+# train and evaluate function
+# since working enviornment takes too long to complete 1 epoch, make frequent log and save model by default 50
+# part is based on batch size
+def train_model(model, iterator, optimizer, loss_fn, iter_part=50):
+
+    global best_valid_loss
     total_length = len(train.examples)
+    total_parts = total_length // (hparams.batch_size * iter_part)
+
+    if total_length % (hparams.batch_size * iter_part) != 0:
+        total_parts+=1
+
     current_part = 1
     model.train()
     epoch_loss = 0
@@ -567,11 +602,11 @@ def train_model(model, iterator, optimizer, loss_fn, part=5):
         # total loss in each epochs
         epoch_loss += float(loss.item())
 
-        if (current_part * i) > (current_part * (total_length / part)):
+        if i % part == 0:
             part_end_time = utils.time.time()
             part_mins, part_secs = utils.epoch_time(part_start_time, part_end_time)
 
-            print(f'{i} / {total_length}, part {current_part} / {part} complete... {part_mins}m {part_secs}s ', sep='')
+            print(f'{total_length if i*hparams.batch_size > total_length else i*hparams.batch_size} / {total_length}, part {current_part} / {total_parts} complete... {part_mins}m {part_secs}s ')
             valid_loss = evaluate_model(model, valid_iterator, loss_fn)
             if valid_loss < best_valid_loss:
                 best_valid_loss = valid_loss
@@ -582,10 +617,11 @@ def train_model(model, iterator, optimizer, loss_fn, part=5):
             show_bleu(test, SRC, TRG, model, device)
 
             current_part += 1
-            print('\n', sep='')
+            print('')
+            sys.stdout.flush()
             model.train()
             part_start_time = utils.time.time()
-
+        del loss
     return epoch_loss / len(iterator)
 
 '''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
@@ -674,8 +710,6 @@ def translate_sentence(sentence, SRC, TRG, model, device, max_len=50, logging=Fa
 '''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
 Training
 '''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
-best_valid_loss = float('inf')
-
 for epoch in range(hparams.n_epochs):
     start_time = utils.time.time()
     train_loss = train_model(model, train_iterator, optimizer, loss_fn)
@@ -686,11 +720,13 @@ for epoch in range(hparams.n_epochs):
     if valid_loss < best_valid_loss:
         best_valid_loss = valid_loss
         torch.save(model.state_dict(), 'transformer_en_de.pt')
-
+    print('---------------------------------------------------------')
     print(f'Epoch: {epoch+1:03} Time: {epoch_mins}m {epoch_secs}s')
     print(f'Train Loss: {train_loss:.3f} Train PPL: {utils.math.exp(train_loss):.3f}')
     print(f'Validation Loss: {valid_loss:.3f} Validation PPL: {utils.math.exp(valid_loss):.3f}')
+    print('---------------------------------------------------------')
     print('\n')
+    sys.stdout.flush()
 
 '''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
 Generation Test
