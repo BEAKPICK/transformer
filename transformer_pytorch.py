@@ -25,6 +25,7 @@ import spacy # for tokenizer
 import sys
 import os
 import os.path
+import random
 
 import preprocess_pytorch as pp # for word embeddings
 import hyperparameters_pytorch as hparams
@@ -35,6 +36,10 @@ preparing data and environment
 
 # torchtext==0.6.0
 '''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
+#sample for time saving 
+sample_valid_size = 50
+sample_test_size = 50
+
 model_filepath = f'{os.getcwd()}/transformer_en_de.pt'
 device = torch.device('cuda:1' if torch.cuda.is_available() else 'cpu')
 
@@ -63,6 +68,10 @@ TRG = Field(tokenize=tokenize_de,
 st = utils.time.time()
 train, valid, test = torchtext.datasets.WMT14.splits(exts=('.en', '.de'),
                                                      fields=(SRC, TRG))
+
+valid.examples = random.sample(valid.examples, sample_valid_size)
+test.examples = random.sample(test.examples, sample_test_size)
+
 et = utils.time.time()
 m, s = utils.epoch_time(st, et)
 print(f'data split completed | time : {m}m {s}s')
@@ -557,7 +566,7 @@ best_valid_loss = float('inf')
 # train and evaluate function
 # since working enviornment takes too long to complete 1 epoch, make frequent log and save model by default 50
 # part is based on batch size
-def train_model(model, iterator, optimizer, loss_fn, iter_part=50):
+def train_model(model, iterator, optimizer, loss_fn, epoch_num, iter_part=50):
 
     global best_valid_loss
     total_length = len(train.examples)
@@ -602,22 +611,20 @@ def train_model(model, iterator, optimizer, loss_fn, iter_part=50):
         # total loss in each epochs
         epoch_loss += float(loss.item())
 
-        if i % part == 0:
-            part_end_time = utils.time.time()
-            part_mins, part_secs = utils.epoch_time(part_start_time, part_end_time)
-
-            print(f'{total_length if i*hparams.batch_size > total_length else i*hparams.batch_size} / {total_length}, part {current_part} / {total_parts} complete... {part_mins}m {part_secs}s ')
+        if (i+1) % iter_part == 0:
+            print(f'{total_length if (i+1)*hparams.batch_size > total_length else (i+1)*hparams.batch_size} / {total_length}, part {current_part} / {total_parts} complete...')
             valid_loss = evaluate_model(model, valid_iterator, loss_fn)
             if valid_loss < best_valid_loss:
                 best_valid_loss = valid_loss
-                torch.save(model.state_dict(), 'transformer_en_de.pt')
+                torch.save(model.state_dict(), f'transformer_en_de.pt')
                 print('model saved')
-            print(f'Part Train Loss: {epoch_loss / i:.3f} | Part Train PPL: {utils.math.exp(epoch_loss / i):.3f}')
+            print(f'Part Train Loss: {epoch_loss / (i+1):.3f} | Part Train PPL: {utils.math.exp(epoch_loss / (i+1)):.3f}')
             print(f'Validation Loss: {valid_loss:.3f} | Validation PPL: {utils.math.exp(valid_loss):.3f}')
             show_bleu(test, SRC, TRG, model, device)
-
+            part_end_time = utils.time.time()
+            part_mins, part_secs = utils.epoch_time(part_start_time, part_end_time)
+            print(f'{part_mins}m {part_secs}s')
             current_part += 1
-            print('')
             sys.stdout.flush()
             model.train()
             part_start_time = utils.time.time()
@@ -712,7 +719,7 @@ Training
 '''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
 for epoch in range(hparams.n_epochs):
     start_time = utils.time.time()
-    train_loss = train_model(model, train_iterator, optimizer, loss_fn)
+    train_loss = train_model(model, train_iterator, optimizer, loss_fn, epoch)
     valid_loss = evaluate_model(model, valid_iterator, loss_fn)
     end_time = utils.time.time()
     epoch_mins, epoch_secs = utils.epoch_time(start_time, end_time)
@@ -720,6 +727,7 @@ for epoch in range(hparams.n_epochs):
     if valid_loss < best_valid_loss:
         best_valid_loss = valid_loss
         torch.save(model.state_dict(), 'transformer_en_de.pt')
+        print('model saved')
     print('---------------------------------------------------------')
     print(f'Epoch: {epoch+1:03} Time: {epoch_mins}m {epoch_secs}s')
     print(f'Train Loss: {train_loss:.3f} Train PPL: {utils.math.exp(train_loss):.3f}')

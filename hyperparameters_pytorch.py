@@ -1,9 +1,9 @@
 d_model = 512
 d_k =  64
 d_v =  64
-n_heads =  8
-n_encoder = 8
-n_decoder = 8
+n_heads = 8 
+n_encoder = 6 
+n_decoder = 6 
 d_ff = 2048
 batch_size = 32 
 
