@@ -37,10 +37,10 @@ preparing data and environment
 # torchtext==0.6.0
 '''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
 #sample for time saving 
-sample_valid_size = 50
-sample_test_size = 50
-
-model_filepath = f'{os.getcwd()}/transformer_en_de.pt'
+sample_valid_size = 100
+sample_test_size = 100
+model_name = 'transformer_en_de2'
+model_filepath = f'{os.getcwd()}/{model_name}.pt'
 device = torch.device('cuda:1' if torch.cuda.is_available() else 'cpu')
 
 spacy_en = spacy.load('en_core_web_sm')
@@ -546,10 +546,10 @@ model = Transformer(encoder=enc,
 if os.path.isfile(model_filepath):
     model.load_state_dict(torch.load(model_filepath))
     print('model loaded from saved file')
-
+else:
+    model.apply(utils.initalize_weights)
 print(f'The model has {utils.count_parameters(model):,} trainable parameters')
 sys.stdout.flush()
-model.apply(utils.initalize_weights)
 
 # set optimizer, scheduler and loss function
 optimizer = torch.optim.Adam(model.parameters(), betas=(0.9, 0.98), lr=hparams.learning_rate)
@@ -616,7 +616,7 @@ def train_model(model, iterator, optimizer, loss_fn, epoch_num, iter_part=50):
             valid_loss = evaluate_model(model, valid_iterator, loss_fn)
             if valid_loss < best_valid_loss:
                 best_valid_loss = valid_loss
-                torch.save(model.state_dict(), f'transformer_en_de.pt')
+                torch.save(model.state_dict(), f'{model_name}.pt')
                 print('model saved')
             print(f'Part Train Loss: {epoch_loss / (i+1):.3f} | Part Train PPL: {utils.math.exp(epoch_loss / (i+1)):.3f}')
             print(f'Validation Loss: {valid_loss:.3f} | Validation PPL: {utils.math.exp(valid_loss):.3f}')
@@ -726,7 +726,7 @@ for epoch in range(hparams.n_epochs):
 
     if valid_loss < best_valid_loss:
         best_valid_loss = valid_loss
-        torch.save(model.state_dict(), 'transformer_en_de.pt')
+        torch.save(model.state_dict(), '{model_name}.pt')
         print('model saved')
     print('---------------------------------------------------------')
     print(f'Epoch: {epoch+1:03} Time: {epoch_mins}m {epoch_secs}s')

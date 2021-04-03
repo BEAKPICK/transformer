@@ -6,7 +6,7 @@ def count_parameters(model):
     return sum(p.numel() for p in model.parameters() if p.requires_grad)
 
 def initalize_weights(model):
-    if hasattr(model, 'weight') and model.weight.dim() > 1:
+    if hasattr(model, 'weight') and model.weight.dim() > 1 and model.__class__.__name__ != 'Embedding':
         nn.init.xavier_uniform_(model.weight.data)
 
 def epoch_time(start_time, end_time):
