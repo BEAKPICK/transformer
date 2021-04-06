@@ -10,4 +10,4 @@ batch_size = 32
 dropout_ratio = 0.1
 learning_rate = 0.0005
 
-n_epochs = 2 
+n_epochs = 10

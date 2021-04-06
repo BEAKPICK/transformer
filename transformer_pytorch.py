@@ -27,7 +27,6 @@ import os
 import os.path
 import random
 
-import preprocess_pytorch as pp # for word embeddings
 import hyperparameters_pytorch as hparams
 import customutils_pytorch as utils
 
@@ -37,10 +36,11 @@ preparing data and environment
 # torchtext==0.6.0
 '''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
 #sample for time saving 
-sample_valid_size = 100
-sample_test_size = 100
+sample_valid_size = 300
+sample_test_size = 50
 model_name = 'transformer_en_de2'
 model_filepath = f'{os.getcwd()}/{model_name}.pt'
+
 device = torch.device('cuda:1' if torch.cuda.is_available() else 'cpu')
 
 spacy_en = spacy.load('en_core_web_sm')
@@ -566,7 +566,7 @@ best_valid_loss = float('inf')
 # train and evaluate function
 # since working enviornment takes too long to complete 1 epoch, make frequent log and save model by default 50
 # part is based on batch size
-def train_model(model, iterator, optimizer, loss_fn, epoch_num, iter_part=50):
+def train_model(model, iterator, optimizer, loss_fn, epoch_num, iter_part=150):
 
     global best_valid_loss
     total_length = len(train.examples)
