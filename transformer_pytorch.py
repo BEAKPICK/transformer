@@ -14,6 +14,8 @@ imports
 import torch
 import torch.optim as optim
 import torch.nn as nn
+from torch.utils.data import DataLoader
+from parallel import DataParallelModel, DataParallelCriterion
 
 import torchtext
 from torchtext.data import Field, BucketIterator
@@ -38,6 +40,7 @@ preparing data and environment
 #sample for time saving 
 sample_valid_size = 300
 sample_test_size = 50
+
 model_name = 'transformer_en_de2'
 model_filepath = f'{os.getcwd()}/{model_name}.pt'
 
@@ -118,17 +121,65 @@ sys.stdout.flush()
 
 # utils.save_pickle(SRC.vocab.stoi, 'src_stoi.pkl')
 # utils.save_pickle(TRG.vocab.stoi, 'trg_stoi.pkl')
-st = utils.time.time()
 
-train_iterator, valid_iterator, test_iterator = BucketIterator.splits(
-    (train, valid, test),
-    batch_size=hparams.batch_size,
-    device=device)
+# st = utils.time.time()
 
-et = utils.time.time()
-m, s = utils.epoch_time(st, et)
-print(f"bucketiterator splits complete | time : {m}m {s}s")
-sys.stdout.flush()
+# train_iterator, valid_iterator, test_iterator = BucketIterator.splits(
+#     (train, valid, test),
+#     batch_size=hparams.batch_size,
+#     device=device)
+
+# et = utils.time.time()
+# m, s = utils.epoch_time(st, et)
+# print(f"bucketiterator splits complete | time : {m}m {s}s")
+# sys.stdout.flush()
+
+'''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
+since BucketIterator is too slow (low GPU, high CPU),
+encouraged to use torch.utils.data.DataLoader
+by https://github.com/pytorch/text/issues/664
+'''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
+# sort by length and pad sequences with similar lengths
+
+# data sorted train, valid, test
+train_ds = sorted([(len(batch.src), len(batch.trg), batch.src, batch.trg) for i, batch in enumerate(train)], key=lambda data:(data[1], data[0]), reverse=True)
+valid_ds = sorted([(len(batch.src), len(batch.trg), batch.src, batch.trg) for i, batch in enumerate(valid)], key=lambda data:(data[1], data[0]), reverse=True)
+test_ds = sorted([(len(batch.src), len(batch.trg), batch.src, batch.trg) for i, batch in enumerate(test)], key=lambda data:(data[1], data[0]), reverse=True)
+
+def pad_data(data):
+    # Find max length of the mini-batch
+
+    # look data as column
+    max_len_trg = max(list(zip(*data))[1])
+    max_len_src = max(list(zip(*data))[0])
+    src_ = list(zip(*data))[2]
+    trg_ = list(zip(*data))[3]
+
+    # pad
+    padded_src = torch.stack([torch.cat((txt, torch.tensor([SRC.vocab.stoi[SRC.pad_token]] * (max_len_src - len(txt))).long())) for txt in src_])
+    # init token
+    padded_src = torch.cat((torch.tensor([[SRC.vocab.stoi[SRC.init_token]]] * len(data)), padded_src), dim=1)
+    # eos token
+    padded_src = torch.cat(padded_src, (torch.tensor([[SRC.vocab.stoi[SRC.eos_token]]] * len(data))), dim=1)
+
+    # pad
+    padded_trg = torch.stack([torch.cat((txt, torch.tensor([TRG.vocab.stoi[TRG.pad_token]] * (max_len_trg - len(txt))).long())) for txt in trg_])
+    # init token
+    padded_trg = torch.cat((torch.tensor([[TRG.vocab.stoi[TRG.init_token]]] * len(data)), padded_trg), dim=1)
+    # eos token
+    padded_trg = torch.cat(padded_trg, (torch.tensor([[TRG.vocab.stoi[TRG.eos_token]]] * len(data))), dim=1)
+
+    return padded_src, padded_trg
+
+train_loader = DataLoader(train_dl, batch_size=hparams.batch_size, collate_fn=pad_data, num_workers=2, shuffle=True)
+valid_loader = DataLoader(valid_dl, batch_size=hparams.batch_size, collate_fn=pad_data, num_workers=2, shuffle=True)
+test_loader = DataLoader(test_dl, batch_size=hparams.batch_size, collate_fn=pad_data, num_workers=2, shuffle=True)
+
+# example
+# for i, batch in enumerate(dataloader):
+#     src = batch[0]
+#     trg = batch[1]
+#     break
 '''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
 embedding
 '''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
@@ -144,26 +195,26 @@ embedding
 # encoder_embed = nn.Embedding.from_pretrained(e_embed)
 # decoder_embed = nn.Embedding.from_pretrained(d_embed)
 
-src_word2vec = Word2Vec.load('src_embedd.model')
-trg_word2vec = Word2Vec.load('trg_embedd.model')
-
-src_vocabsize = len(SRC.vocab.stoi)
-trg_vocabsize = len(TRG.vocab.stoi)
-
-src_embed_mtrx = torch.randn(src_vocabsize, hparams.d_model).to(device)
-trg_embed_mtrx = torch.randn(trg_vocabsize, hparams.d_model).to(device)
-
-for i in range(src_vocabsize):
-    word = list(SRC.vocab.stoi.keys())[i]
-    if word in src_word2vec.wv.index2word:
-        src_embed_mtrx[SRC.vocab.stoi[word]] = torch.tensor(src_word2vec.wv[word].copy()).to(device)
-
-for i in range(trg_vocabsize):
-    word = list(TRG.vocab.stoi.keys())[i]
-    if word in trg_word2vec.wv.index2word:
-        trg_embed_mtrx[TRG.vocab.stoi[word]] = torch.tensor(trg_word2vec.wv[word].copy()).to(device)
-
-print("pretrained word embeddings loaded")
+# src_word2vec = Word2Vec.load('src_embedd.model')
+# trg_word2vec = Word2Vec.load('trg_embedd.model')
+#
+# src_vocabsize = len(SRC.vocab.stoi)
+# trg_vocabsize = len(TRG.vocab.stoi)
+#
+# src_embed_mtrx = torch.randn(src_vocabsize, hparams.d_model).to(device)
+# trg_embed_mtrx = torch.randn(trg_vocabsize, hparams.d_model).to(device)
+#
+# for i in range(src_vocabsize):
+#     word = list(SRC.vocab.stoi.keys())[i]
+#     if word in src_word2vec.wv.index2word:
+#         src_embed_mtrx[SRC.vocab.stoi[word]] = torch.tensor(src_word2vec.wv[word].copy()).to(device)
+#
+# for i in range(trg_vocabsize):
+#     word = list(TRG.vocab.stoi.keys())[i]
+#     if word in trg_word2vec.wv.index2word:
+#         trg_embed_mtrx[TRG.vocab.stoi[word]] = torch.tensor(trg_word2vec.wv[word].copy()).to(device)
+#
+# print("pretrained word embeddings loaded")
 '''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
 positional encoding
 '''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
@@ -543,11 +594,11 @@ model = Transformer(encoder=enc,
                     trg_pad_idx=TRG_PAD_IDX,
                     device=device).to(device)
 
-if os.path.isfile(model_filepath):
-    model.load_state_dict(torch.load(model_filepath))
-    print('model loaded from saved file')
-else:
-    model.apply(utils.initalize_weights)
+# if os.path.isfile(model_filepath):
+#     model.load_state_dict(torch.load(model_filepath))
+#     print('model loaded from saved file')
+# else:
+#     model.apply(utils.initalize_weights)
 print(f'The model has {utils.count_parameters(model):,} trainable parameters')
 sys.stdout.flush()
 
@@ -582,8 +633,10 @@ def train_model(model, iterator, optimizer, loss_fn, epoch_num, iter_part=150):
     part_start_time = utils.time.time()
 
     for i, batch in enumerate(iterator):
-        src = batch.src
-        trg = batch.trg
+        src = batch[0]
+        trg = batch[1]
+        # src = batch.src
+        # trg = batch.trg
 
         optimizer.zero_grad()
 
@@ -614,10 +667,10 @@ def train_model(model, iterator, optimizer, loss_fn, epoch_num, iter_part=150):
         if (i+1) % iter_part == 0:
             print(f'{total_length if (i+1)*hparams.batch_size > total_length else (i+1)*hparams.batch_size} / {total_length}, part {current_part} / {total_parts} complete...')
             valid_loss = evaluate_model(model, valid_iterator, loss_fn)
-            if valid_loss < best_valid_loss:
-                best_valid_loss = valid_loss
-                torch.save(model.state_dict(), f'{model_name}.pt')
-                print('model saved')
+            # if valid_loss < best_valid_loss:
+            #     best_valid_loss = valid_loss
+            #     torch.save(model.state_dict(), f'{model_name}.pt')
+            #     print('model saved')
             print(f'Part Train Loss: {epoch_loss / (i+1):.3f} | Part Train PPL: {utils.math.exp(epoch_loss / (i+1)):.3f}')
             print(f'Validation Loss: {valid_loss:.3f} | Validation PPL: {utils.math.exp(valid_loss):.3f}')
             show_bleu(test, SRC, TRG, model, device)
@@ -719,8 +772,8 @@ Training
 '''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
 for epoch in range(hparams.n_epochs):
     start_time = utils.time.time()
-    train_loss = train_model(model, train_iterator, optimizer, loss_fn, epoch)
-    valid_loss = evaluate_model(model, valid_iterator, loss_fn)
+    train_loss = train_model(model, train_loader, optimizer, loss_fn, epoch)
+    valid_loss = evaluate_model(model, valid_loader, loss_fn)
     end_time = utils.time.time()
     epoch_mins, epoch_secs = utils.epoch_time(start_time, end_time)
 
