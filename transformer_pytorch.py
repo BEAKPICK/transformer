@@ -14,15 +14,20 @@ imports
 import torch
 import torch.optim as optim
 import torch.nn as nn
-from torch.utils.data import DataLoader
+import torch.nn.functional as F
+from torch.autograd import Variable
+from torch.nn.modules.loss import _WeightedLoss
+from torch.utils.data import DataLoader, BatchSampler, RandomSampler, Sampler
 from parallel import DataParallelModel, DataParallelCriterion
 
 import torchtext
 from torchtext.data import Field, BucketIterator
+import spacy # for tokenizer
 
 from gensim.models import Word2Vec
+from glove import Glove
+import glove
 import numpy as np
-import spacy # for tokenizer
 
 import sys
 import os
@@ -37,11 +42,11 @@ preparing data and environment
 
 # torchtext==0.6.0
 '''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
-#sample for time saving 
+'''sample for time saving'''
 sample_valid_size = 300
 sample_test_size = 50
 
-model_name = 'transformer_en_de2'
+model_name = 'transformer_en_de_w2v_2'
 model_filepath = f'{os.getcwd()}/{model_name}.pt'
 
 device = torch.device('cuda:1' if torch.cuda.is_available() else 'cpu')
@@ -49,20 +54,23 @@ device = torch.device('cuda:1' if torch.cuda.is_available() else 'cpu')
 spacy_en = spacy.load('en_core_web_sm')
 spacy_de = spacy.load('de_core_news_sm')
 
+share_vocab = True
+
 def tokenize_en(text):
     return [token.text for token in spacy_en.tokenizer(text)]
 
 def tokenize_de(text):
     return [token.text for token in spacy_de.tokenizer(text)]
 
-# load data
-SRC = Field(tokenize=tokenize_en,
+'''load data'''
+
+SRC = Field(tokenize = tokenize_en,
             init_token='<sos>',
             eos_token='<eos>',
             lower=True,
             batch_first=True)
 
-TRG = Field(tokenize=tokenize_de,
+TRG = Field(tokenize = tokenize_de,
             init_token='<sos>',
             eos_token='<eos>',
             lower=True,
@@ -72,6 +80,7 @@ st = utils.time.time()
 train, valid, test = torchtext.datasets.WMT14.splits(exts=('.en', '.de'),
                                                      fields=(SRC, TRG))
 
+# train.examples = random.sample(train.examples, sample_valid_size)
 valid.examples = random.sample(valid.examples, sample_valid_size)
 test.examples = random.sample(test.examples, sample_test_size)
 
@@ -79,25 +88,10 @@ et = utils.time.time()
 m, s = utils.epoch_time(st, et)
 print(f'data split completed | time : {m}m {s}s')
 sys.stdout.flush()
+
 # utils.save_pickle(train, 'train.pkl')
 # utils.save_pickle(valid, 'valid.pkl')
 # utils.save_pickle(test, 'test.pkl')
-
-# create vocabulary
-# import os
-# if os.path.exists(f'{os.getcwd()}\src_vocab.txt'):
-#     SRC.vocab = utils.read_vocab('src_vocab.txt')
-#     print("SRC loaded by src_vocab.txt")
-# else:
-#     SRC.build_vocab(train)
-#     print("SRC build success")
-#
-# if os.path.exists(f'{os.getcwd()}\\trg_vocab.txt'):
-#     TRG.vocab = utils.read_vocab('trg_vocab.txt')
-#     print("TRG loaded by trg_vocab.txt")
-# else:
-#     TRG.build_vocab(train)
-#     print("TRG build success")
 
 st = utils.time.time()
 SRC.build_vocab(train)
@@ -112,23 +106,31 @@ m, s = utils.epoch_time(st, et)
 print(f"TRG build success | time : {m}m {s}s")
 sys.stdout.flush()
 
-# make sure mark them if you have SRC, TRG saved
-# utils.save_vocab(SRC.vocab, 'src_vocab.txt')
-# utils.save_vocab(TRG.vocab, 'trg_vocab.txt')
+# if share_vocab:
+#     print('Merging two vocabulary...')
+#     for w, _ in SRC.vocab.stoi.items():
+#         if w not in TRG.vocab.stoi:
+#             TRG.vocab.stoi[w] = len(TRG.vocab.stoi)
+#     TRG.vocab.itos = [None] * len(TRG.vocab.stoi)
+#     for w, i in TRG.vocab.stoi.items():
+#         TRG.vocab.itos[i] = w
+#     SRC.vocab.stoi = TRG.vocab.stoi
+#     SRC.vocab.itos = TRG.vocab.itos
+#     print('Get merged vocabulary size: ', len(TRG.vocab))
 
-# SRC.build_vocab(train)
-# TRG.build_vocab(train)
+'''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
+BucketIterator
 
-# utils.save_pickle(SRC.vocab.stoi, 'src_stoi.pkl')
-# utils.save_pickle(TRG.vocab.stoi, 'trg_stoi.pkl')
+if your computer has just a few cores, maybe able to go with it.
+since bucketiterator can not fix number of workers,
+DataLoader is recommended
+'''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
 
 # st = utils.time.time()
-
 # train_iterator, valid_iterator, test_iterator = BucketIterator.splits(
 #     (train, valid, test),
 #     batch_size=hparams.batch_size,
 #     device=device)
-
 # et = utils.time.time()
 # m, s = utils.epoch_time(st, et)
 # print(f"bucketiterator splits complete | time : {m}m {s}s")
@@ -139,71 +141,113 @@ since BucketIterator is too slow (low GPU, high CPU),
 encouraged to use torch.utils.data.DataLoader
 by https://github.com/pytorch/text/issues/664
 '''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
-# sort by length and pad sequences with similar lengths
+'''sort by length and pad sequences with similar lengths'''
 
-# data sorted train, valid, test
-train_ds = sorted([(len(batch.src), len(batch.trg), batch.src, batch.trg) for i, batch in enumerate(train)], key=lambda data:(data[1], data[0]), reverse=True)
-valid_ds = sorted([(len(batch.src), len(batch.trg), batch.src, batch.trg) for i, batch in enumerate(valid)], key=lambda data:(data[1], data[0]), reverse=True)
-test_ds = sorted([(len(batch.src), len(batch.trg), batch.src, batch.trg) for i, batch in enumerate(test)], key=lambda data:(data[1], data[0]), reverse=True)
+# class BySequenceLengthSampler(Sampler):
+#     def __init__(self, data_source, bucket_boundaries, batch_size=hparams.batch_size):
+#         ind_n_len = []
+#         for i, p in enumerate(data_source):
+#             ind_n_len.append((i, (p[0], p[1]))) # for length of src, trg
+#         self.ind_n_len = ind_n_len
+#         self.bucket_boundaries = bucket_boundaries
+#         self.batch_size = batch_size
+#
+#     def element_to_bucket_id(self, x, seq_lengh):
+#         boundaries = list(self.bucket_boundaries)
+#         buckets_min = [np.iinfo(np.int32).min] + boundaries
+#         buckets_max = boundaries + [np.iinfo(np.int32).max]
+#         conditions_c = np.logical_and(np.less_equal(buckets_min, seq_lengh),
+#                                       np.less(seq_lengh, buckets_max))
+#         bucket_id = np.min(np.where(conditions_c))
+#         return bucket_id
+#
+#     def __iter__(self):
+#         data_buckets = dict()
+#         for p, seq_len in self.ind_n_len:
+#             pid = self.element_to_bucket_id(p, seq_len)
+#             if pid in data_buckets.keys():
+#                 data_buckets[pid].append(p)
+#             else:
+#                 data_buckets[pid] = [p]
+#
+#         iter_list = []
+#         for k in data_buckets.keys():
+#             np.random.shuffle(data_buckets[k])
+#             iter_list += (np.array_split(data_buckets[k]
+#                                          , int(data_buckets[k][0] / self.batch_size)))
+#         random.shuffle(iter_list)  # shuffle all the batches so they arent ordered by bucket
+#         # size
+#         for i in iter_list:
+#             yield i.tolist()  # as it was stored in an array
+#
+# bucket_boundaries = [i for i in range(5,
+#                                       max([len(vars(train.examples[i])['src']) for i in range(len(train.examples))]+
+#                                           [len(vars(train.examples[i])['trg']) for i in range(len(train.examples))]),
+#                                       20)]
+
+train_ds = sorted([(len(each.src),
+                    len(each.trg),
+                    [SRC.vocab[i] for i in each.src],
+                    [TRG.vocab[i] for i in each.trg])
+                    for i, each in enumerate(train)], key=lambda data:(data[0], data[1]), reverse=True)
+valid_ds = sorted([(len(each.src),
+                    len(each.trg),
+                    [SRC.vocab[i] for i in each.src],
+                    [TRG.vocab[i] for i in each.trg])
+                   for i, each in enumerate(valid)], key=lambda data:(data[0], data[1]), reverse=True)
+test_ds = sorted([(len(each.src),
+                   len(each.trg),
+                   [SRC.vocab[i] for i in each.src],
+                   [TRG.vocab[i] for i in each.trg])
+                  for i, each in enumerate(test)], key=lambda data:(data[0], data[1]), reverse=True)
 
 def pad_data(data):
-    # Find max length of the mini-batch
+    '''Find max length of the mini-batch'''
 
-    # look data as column
+    '''look data as column'''
     max_len_trg = max(list(zip(*data))[1])
     max_len_src = max(list(zip(*data))[0])
     src_ = list(zip(*data))[2]
     trg_ = list(zip(*data))[3]
 
-    # pad
-    padded_src = torch.stack([torch.cat((txt, torch.tensor([SRC.vocab.stoi[SRC.pad_token]] * (max_len_src - len(txt))).long())) for txt in src_])
-    # init token
+    '''eos + pad'''
+    padded_src = torch.stack([torch.cat((torch.tensor(txt), torch.tensor([SRC.vocab.stoi[SRC.eos_token]]+([SRC.vocab.stoi[SRC.pad_token]] * (max_len_src - len(txt)))).long())) for txt in src_])
+    '''init token'''
     padded_src = torch.cat((torch.tensor([[SRC.vocab.stoi[SRC.init_token]]] * len(data)), padded_src), dim=1)
-    # eos token
-    padded_src = torch.cat(padded_src, (torch.tensor([[SRC.vocab.stoi[SRC.eos_token]]] * len(data))), dim=1)
 
-    # pad
-    padded_trg = torch.stack([torch.cat((txt, torch.tensor([TRG.vocab.stoi[TRG.pad_token]] * (max_len_trg - len(txt))).long())) for txt in trg_])
-    # init token
+    '''eos + pad'''
+    padded_trg = torch.stack([torch.cat((torch.tensor(txt), torch.tensor([TRG.vocab.stoi[TRG.eos_token]]+([TRG.vocab.stoi[TRG.pad_token]] * (max_len_trg - len(txt)))).long())) for txt in trg_])
+    '''init token'''
     padded_trg = torch.cat((torch.tensor([[TRG.vocab.stoi[TRG.init_token]]] * len(data)), padded_trg), dim=1)
-    # eos token
-    padded_trg = torch.cat(padded_trg, (torch.tensor([[TRG.vocab.stoi[TRG.eos_token]]] * len(data))), dim=1)
 
     return padded_src, padded_trg
 
-train_loader = DataLoader(train_dl, batch_size=hparams.batch_size, collate_fn=pad_data, num_workers=2, shuffle=True)
-valid_loader = DataLoader(valid_dl, batch_size=hparams.batch_size, collate_fn=pad_data, num_workers=2, shuffle=True)
-test_loader = DataLoader(test_dl, batch_size=hparams.batch_size, collate_fn=pad_data, num_workers=2, shuffle=True)
+# sampler = BySequenceLengthSampler(train_ds, bucket_boundaries, hparams.batch_size)
+train_loader = DataLoader(train_ds, batch_size=hparams.batch_size, collate_fn=pad_data, num_workers=0)
+valid_loader = DataLoader(valid_ds, batch_size=hparams.batch_size, collate_fn=pad_data, num_workers=0, shuffle=True)
+test_loader = DataLoader(test_ds, batch_size=hparams.batch_size, collate_fn=pad_data, num_workers=0, shuffle=True)
 
 # example
 # for i, batch in enumerate(dataloader):
 #     src = batch[0]
 #     trg = batch[1]
 #     break
+
 '''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
 embedding
 '''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
-# pretrain word embedding (further work)
-# src_model, trg_model = pp.Custom_WordEmbedding(train)
+src_vocabsize = len(SRC.vocab.stoi)
+trg_vocabsize = len(TRG.vocab.stoi)
 
-# e_embed = torch.randn(len(SRC.vocab.stoi), hparams.d_model, requires_grad=True)
-# d_embed = torch.randn(len(TRG.vocab.stoi), hparams.d_model, requires_grad=True)
-#
-# SRC.vocab.set_vectors(stoi=SRC.vocab.stoi, vectors=e_embed, dim=hparams.d_model)
-# TRG.vocab.set_vectors(stoi=TRG.vocab.stoi, vectors=d_embed, dim=hparams.d_model)
-#
-# encoder_embed = nn.Embedding.from_pretrained(e_embed)
-# decoder_embed = nn.Embedding.from_pretrained(d_embed)
+src_embed_mtrx = torch.randn(src_vocabsize, hparams.d_model).to(device)
+trg_embed_mtrx = torch.randn(trg_vocabsize, hparams.d_model).to(device)
 
+'''
+for word2vec
+'''
 # src_word2vec = Word2Vec.load('src_embedd.model')
 # trg_word2vec = Word2Vec.load('trg_embedd.model')
-#
-# src_vocabsize = len(SRC.vocab.stoi)
-# trg_vocabsize = len(TRG.vocab.stoi)
-#
-# src_embed_mtrx = torch.randn(src_vocabsize, hparams.d_model).to(device)
-# trg_embed_mtrx = torch.randn(trg_vocabsize, hparams.d_model).to(device)
-#
+
 # for i in range(src_vocabsize):
 #     word = list(SRC.vocab.stoi.keys())[i]
 #     if word in src_word2vec.wv.index2word:
@@ -213,8 +257,24 @@ embedding
 #     word = list(TRG.vocab.stoi.keys())[i]
 #     if word in trg_word2vec.wv.index2word:
 #         trg_embed_mtrx[TRG.vocab.stoi[word]] = torch.tensor(trg_word2vec.wv[word].copy()).to(device)
-#
-# print("pretrained word embeddings loaded")
+
+'''
+for glove
+'''
+glove = Glove()
+src_glove = glove.load('src_glove.model')
+trg_glove = glove.load('trg_glove.model')
+
+for word in list(SRC.vocab.stoi.keys()):
+    if word in src_glove.dictionary:
+        src_embed_mtrx[SRC.vocab.stoi[word]] = torch.tensor(src_glove.word_vectors[src_glove.dictionary[word]].copy()).to(device)
+
+for word in list(SRC.vocab.stoi.keys()):
+    if word in trg_glove.dictionary:
+        trg_embed_mtrx[SRC.vocab.stoi[word]] = torch.tensor(trg_glove.word_vectors[trg_glove.dictionary[word]].copy()).to(device)
+
+print("pretrained word embeddings loaded")
+
 '''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
 positional encoding
 '''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
@@ -323,6 +383,7 @@ class TransformerEncoderLayer(nn.Module):
         self.dropout = nn.Dropout(dropout_ratio).to(device)
 
     def forward(self, src, src_mask):
+
         # src: [batch_size, src_len, d_model]
         # src_mask: [batch_size, src_len]
 
@@ -343,7 +404,7 @@ class TransformerEncoder(nn.Module):
 
         self.device = device
 
-        self.tok_embedding = nn.Embedding(input_dim, d_model).from_pretrained(src_embed_mtrx).requires_grad_(False).to(self.device)
+        self.tok_embedding = nn.Embedding(input_dim, d_model).requires_grad_(False).to(self.device)
         self.layers = nn.ModuleList([TransformerEncoderLayer(d_k=d_k,
                                                              d_v=d_v,
                                                              d_model=d_model,
@@ -358,7 +419,8 @@ class TransformerEncoder(nn.Module):
         batch_size =src.shape[0]
         src_len = src.shape[1]
 
-        # to map position index information
+        '''to map position index information'''
+
         # pos = torch.arange(0, src_len).unsqueeze(0).repeat(batch_size, 1).to(self.device)
         src = self.dropout(self.tok_embedding(src))
         pe = torch.FloatTensor(get_sinusoid_encoding_table(src_len, src.shape[2])).to(self.device)
@@ -428,7 +490,7 @@ class TransformerDecoder(nn.Module):
         super().__init__()
         self.device = device
 
-        self.tok_embedding = nn.Embedding(output_dim, d_model).from_pretrained(trg_embed_mtrx).requires_grad_(False)
+        self.tok_embedding = nn.Embedding(output_dim, d_model).requires_grad_(False)
         self.layers = nn.ModuleList([TransformerDecoderLayer(d_k=d_k,
                                                              d_v=d_v,
                                                              d_model=d_model,
@@ -448,7 +510,8 @@ class TransformerDecoder(nn.Module):
         # pos: [batch_size, trg_len]
         trg = self.dropout(self.tok_embedding(trg))
         pe = torch.FloatTensor(get_sinusoid_encoding_table(trg_len, trg.shape[2])).to(self.device)
-        # +positional encoding
+
+        '''+positional encoding'''
         with torch.no_grad():
             trg += pe 
         del pe
@@ -559,11 +622,47 @@ def show_bleu(data, SRC, TRG, model, device, logging = False, max_len=50):
     # print(f'Cumulative BLEU4 score = {cumulative_bleu4_score * 100:.2f}')
 
 '''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
+Label Smoothing
+refered to https://stackoverflow.com/questions/55681502/label-smoothing-in-pytorch
+'''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
+"""
+output (FloatTensor): batch_size x n_classes
+target (LongTensor): batch_size
+"""
+class LabelSmoothingLoss(nn.Module):
+    def __init__(self, classes, smoothing=0.0, dim=-1, weight = None, ignore_index=1):
+        """if smoothing == 0, it's one-hot method
+           if 0 < smoothing < 1, it's smooth method
+        """
+        super(LabelSmoothingLoss, self).__init__()
+        self.confidence = 1.0 - smoothing
+        self.smoothing = smoothing
+        self.weight = weight
+        self.cls = classes
+        self.dim = dim
+        self.ignore_index = ignore_index
+
+    def forward(self, pred, target):
+        assert 0 <= self.smoothing < 1
+        pred = pred.log_softmax(dim=self.dim)
+
+        if self.weight is not None:
+            pred = pred * self.weight.unsqueeze(0)
+
+        with torch.no_grad():
+            true_dist = torch.zeros_like(pred)
+            true_dist.fill_(self.smoothing / (self.cls - 1))
+            true_dist.scatter_(1, target.data.unsqueeze(1), self.confidence)
+            true_dist.masked_fill_((target == self.ignore_index).unsqueeze(1), 0)
+
+        return torch.mean(torch.sum(-true_dist * pred, dim=self.dim))
+
+'''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
 Preparing for Training
 '''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
 # prepare model
-INPUT_DIM = len(SRC.vocab)
-OUTPUT_DIM = len(TRG.vocab)
+INPUT_DIM = len(SRC.vocab.stoi)
+OUTPUT_DIM = len(TRG.vocab.stoi)
 
 SRC_PAD_IDX = SRC.vocab.stoi[SRC.pad_token]
 TRG_PAD_IDX = TRG.vocab.stoi[TRG.pad_token]
@@ -594,15 +693,16 @@ model = Transformer(encoder=enc,
                     trg_pad_idx=TRG_PAD_IDX,
                     device=device).to(device)
 
-# if os.path.isfile(model_filepath):
-#     model.load_state_dict(torch.load(model_filepath))
-#     print('model loaded from saved file')
-# else:
-#     model.apply(utils.initalize_weights)
+if os.path.isfile(model_filepath):
+    model.load_state_dict(torch.load(model_filepath))
+    print('model loaded from saved file')
+else:
+    model.apply(utils.initalize_weights)
+
 print(f'The model has {utils.count_parameters(model):,} trainable parameters')
 sys.stdout.flush()
 
-# set optimizer, scheduler and loss function
+'''set optimizer, scheduler and loss function'''
 optimizer = torch.optim.Adam(model.parameters(), betas=(0.9, 0.98), lr=hparams.learning_rate)
 warmup_steps = 4000
 scheduler = optim.lr_scheduler.LambdaLR(optimizer=optimizer,
@@ -610,13 +710,15 @@ scheduler = optim.lr_scheduler.LambdaLR(optimizer=optimizer,
                                         last_epoch=-1,
                                         verbose=False)
 
-loss_fn = nn.CrossEntropyLoss(ignore_index=TRG_PAD_IDX)
+# loss_fn = nn.CrossEntropyLoss(ignore_index=TRG_PAD_IDX)
+loss_fn = LabelSmoothingLoss(smoothing=hparams.label_smoothing, classes=len(TRG.vocab.stoi), ignore_index=TRG_PAD_IDX)
 
 best_valid_loss = float('inf')
 
-# train and evaluate function
-# since working enviornment takes too long to complete 1 epoch, make frequent log and save model by default 50
-# part is based on batch size
+'''
+since working enviornment takes too long to complete 1 epoch, make frequent log and save model
+logged after (iter_part * batch_size) are completed
+'''
 def train_model(model, iterator, optimizer, loss_fn, epoch_num, iter_part=150):
 
     global best_valid_loss
@@ -635,17 +737,21 @@ def train_model(model, iterator, optimizer, loss_fn, epoch_num, iter_part=150):
     for i, batch in enumerate(iterator):
         src = batch[0]
         trg = batch[1]
+
+        '''for bucketiterator users'''
         # src = batch.src
         # trg = batch.trg
+        ''''''''''''''''''''''''''''''
 
         optimizer.zero_grad()
 
-        # exclude <eos> for decoder input
+        '''exclude <eos> for decoder input'''
         output, _ = model(src, trg[:, :-1])
         # output: [batch_size, trg_len-1, output_dim]
 
         output_dim = output.shape[-1]
         output = output.contiguous().view(-1, output_dim)
+
         # output: [batch_size*trg_len-1, output_dim]
 
         trg = trg[:,1:].contiguous().view(-1)
@@ -654,26 +760,27 @@ def train_model(model, iterator, optimizer, loss_fn, epoch_num, iter_part=150):
         loss = loss_fn(output, trg)
         loss.backward()
 
-        # graident clipping
+        '''graident clipping'''
         # torch.nn.utils.clip_grad_norm_(model.parameters(), clip)
 
-        # parameter update
+        '''parameter update'''
         optimizer.step()
         scheduler.step()
 
-        # total loss in each epochs
+        '''total loss in each epochs'''
         epoch_loss += float(loss.item())
 
+        '''part log part'''
         if (i+1) % iter_part == 0:
             print(f'{total_length if (i+1)*hparams.batch_size > total_length else (i+1)*hparams.batch_size} / {total_length}, part {current_part} / {total_parts} complete...')
             valid_loss = evaluate_model(model, valid_iterator, loss_fn)
-            # if valid_loss < best_valid_loss:
-            #     best_valid_loss = valid_loss
-            #     torch.save(model.state_dict(), f'{model_name}.pt')
-            #     print('model saved')
+            if valid_loss < best_valid_loss:
+                best_valid_loss = valid_loss
+                torch.save(model.state_dict(), f'{model_name}.pt')
+                print('model saved')
             print(f'Part Train Loss: {epoch_loss / (i+1):.3f} | Part Train PPL: {utils.math.exp(epoch_loss / (i+1)):.3f}')
             print(f'Validation Loss: {valid_loss:.3f} | Validation PPL: {utils.math.exp(valid_loss):.3f}')
-            show_bleu(test, SRC, TRG, model, device)
+            # show_bleu(test, SRC, TRG, model, device) '''show_bleu is too slow'''
             part_end_time = utils.time.time()
             part_mins, part_secs = utils.epoch_time(part_start_time, part_end_time)
             print(f'{part_mins}m {part_secs}s')
@@ -693,14 +800,14 @@ def evaluate_model(model, iterator, loss_fn):
 
     with torch.no_grad():
         for i, batch in enumerate(iterator):
-            src = batch.src
-            trg = batch.trg
+            src = batch[0].to(device)
+            trg = batch[1].to(device)
 
             output, _ = model(src, trg[:, :-1])
 
             output_dim = output.shape[-1]
 
-            # exclude <eos> for decoder input
+            '''exclude <eos> for decoder input'''
             output, _ = model(src, trg[:, :-1])
             # output: [batch_size, trg_len-1, output_dim]
 
@@ -713,7 +820,7 @@ def evaluate_model(model, iterator, loss_fn):
 
             loss = loss_fn(output, trg)
 
-            # total loss in each epochs
+            '''total loss in each epochs'''
             epoch_loss += float(loss.item())
 
     return epoch_loss / len(iterator)
@@ -730,9 +837,9 @@ def translate_sentence(sentence, SRC, TRG, model, device, max_len=50, logging=Fa
     else:
         tokens = [token.lower() for token in sentence]
 
-    # put <sos> in the first, <eos> in the end.
+    '''put <sos> in the first, <eos> in the end.'''
     tokens = [SRC.init_token] + tokens + [SRC.eos_token]
-    # convert to indexes
+    '''convert to indexes'''
     src_indexes = [SRC.vocab.stoi[token] for token in tokens]
 
     if logging:
@@ -746,7 +853,7 @@ def translate_sentence(sentence, SRC, TRG, model, device, max_len=50, logging=Fa
     with torch.no_grad():
         enc_src = model.encoder(src_tensor, src_pad_mask)
 
-    # always start with first token
+    '''always start with first token'''
     trg_indexes = [TRG.vocab.stoi[TRG.init_token]]
 
     for i in range(max_len):
@@ -785,6 +892,7 @@ for epoch in range(hparams.n_epochs):
     print(f'Epoch: {epoch+1:03} Time: {epoch_mins}m {epoch_secs}s')
     print(f'Train Loss: {train_loss:.3f} Train PPL: {utils.math.exp(train_loss):.3f}')
     print(f'Validation Loss: {valid_loss:.3f} Validation PPL: {utils.math.exp(valid_loss):.3f}')
+    show_bleu(test, SRC, TRG, model, device)
     print('---------------------------------------------------------')
     print('\n')
     sys.stdout.flush()
