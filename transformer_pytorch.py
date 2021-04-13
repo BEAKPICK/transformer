@@ -3,7 +3,7 @@ let's start transformer!
 the code refered to
 https://github.com/ndb796/Deep-Learning-Paper-Review-and-Practice/blob/master/code_practices/Attention_is_All_You_Need_Tutorial_(German_English).ipynb
 
-1. dataset from wmt 2014 English-German or newstest2013 for dev
+1. dataset from wmt 2014 English-German
 2. tokenize them
 3. make transformer model
 4. train and evaluate model
@@ -46,8 +46,9 @@ preparing data and environment
 sample_valid_size = 300
 sample_test_size = 50
 
-model_name = 'transformer_en_de_w2v_2'
+model_name = 'transformer_en_de_gl_2'
 model_filepath = f'{os.getcwd()}/{model_name}.pt'
+vocab_filepath = f'{os.getcwd()}/.data/wmt14/vocab.bpe.32000'
 
 device = torch.device('cuda:1' if torch.cuda.is_available() else 'cpu')
 
@@ -81,7 +82,7 @@ train, valid, test = torchtext.datasets.WMT14.splits(exts=('.en', '.de'),
                                                      fields=(SRC, TRG))
 
 # train.examples = random.sample(train.examples, sample_valid_size)
-valid.examples = random.sample(valid.examples, sample_valid_size)
+# valid.examples = random.sample(valid.examples, sample_valid_size)
 test.examples = random.sample(test.examples, sample_test_size)
 
 et = utils.time.time()
@@ -94,29 +95,49 @@ sys.stdout.flush()
 # utils.save_pickle(test, 'test.pkl')
 
 st = utils.time.time()
-SRC.build_vocab(train)
+
+if os.path.isfile(vocab_filepath):
+    with open(vocab_filepath, 'r', encoding='utf-8') as f:
+        vocablist = [i for i in f.read().split('\n') ]
+    print('src vocab_file loaded')
+    sys.stdout.flush()
+    SRC.build_vocab(train, valid, test, [vocablist])
+else:
+    SRC.build_vocab(train, valid, test)
+
 et = utils.time.time()
 m, s = utils.epoch_time(st, et)
 print(f"SRC build success | time : {m}m {s}s")
 sys.stdout.flush()
+
 st = utils.time.time()
-TRG.build_vocab(train)
+
+if os.path.isfile(vocab_filepath):
+    with open(vocab_filepath, 'r', encoding='utf-8') as f:
+        vocablist = [i for i in f.read().split('\n')]
+    print('trg vocab_file loaded')
+    sys.stdout.flush()
+    TRG.build_vocab(train, valid, test, [vocablist])
+else:
+    TRG.build_vocab(train, valid, test)
+
 et = utils.time.time()
 m, s = utils.epoch_time(st, et)
 print(f"TRG build success | time : {m}m {s}s")
 sys.stdout.flush()
 
-# if share_vocab:
-#     print('Merging two vocabulary...')
-#     for w, _ in SRC.vocab.stoi.items():
-#         if w not in TRG.vocab.stoi:
-#             TRG.vocab.stoi[w] = len(TRG.vocab.stoi)
-#     TRG.vocab.itos = [None] * len(TRG.vocab.stoi)
-#     for w, i in TRG.vocab.stoi.items():
-#         TRG.vocab.itos[i] = w
-#     SRC.vocab.stoi = TRG.vocab.stoi
-#     SRC.vocab.itos = TRG.vocab.itos
-#     print('Get merged vocabulary size: ', len(TRG.vocab))
+if share_vocab:
+    print('Merging two vocabulary...')
+    for w, _ in SRC.vocab.stoi.items():
+        if w not in TRG.vocab.stoi:
+            TRG.vocab.stoi[w] = len(TRG.vocab.stoi)
+    TRG.vocab.itos = [None] * len(TRG.vocab.stoi)
+    for w, i in TRG.vocab.stoi.items():
+        TRG.vocab.itos[i] = w
+    SRC.vocab.stoi = TRG.vocab.stoi
+    SRC.vocab.itos = TRG.vocab.itos
+    print('Get merged vocabulary size: ', len(TRG.vocab))
+    sys.stdout.flush()
 
 '''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
 BucketIterator
@@ -201,31 +222,54 @@ test_ds = sorted([(len(each.src),
                    [TRG.vocab[i] for i in each.trg])
                   for i, each in enumerate(test)], key=lambda data:(data[0], data[1]), reverse=True)
 
+max_len_sentence = 0
+
 def pad_data(data):
     '''Find max length of the mini-batch'''
 
     '''look data as column'''
+    global max_len_sentence
+
     max_len_trg = max(list(zip(*data))[1])
     max_len_src = max(list(zip(*data))[0])
     src_ = list(zip(*data))[2]
     trg_ = list(zip(*data))[3]
 
     '''eos + pad'''
-    padded_src = torch.stack([torch.cat((torch.tensor(txt), torch.tensor([SRC.vocab.stoi[SRC.eos_token]]+([SRC.vocab.stoi[SRC.pad_token]] * (max_len_src - len(txt)))).long())) for txt in src_])
+    padded_src = torch.stack([torch.cat((torch.tensor(txt).to('cpu'), torch.tensor([SRC.vocab.stoi[SRC.eos_token]]+([SRC.vocab.stoi[SRC.pad_token]] * (max_len_src - len(txt)))).long().to('cpu'))) for txt in src_])
     '''init token'''
-    padded_src = torch.cat((torch.tensor([[SRC.vocab.stoi[SRC.init_token]]] * len(data)), padded_src), dim=1)
+    padded_src = torch.cat((torch.tensor([[SRC.vocab.stoi[SRC.init_token]]] * len(data)).to('cpu'), padded_src), dim=1)
 
     '''eos + pad'''
-    padded_trg = torch.stack([torch.cat((torch.tensor(txt), torch.tensor([TRG.vocab.stoi[TRG.eos_token]]+([TRG.vocab.stoi[TRG.pad_token]] * (max_len_trg - len(txt)))).long())) for txt in trg_])
+    padded_trg = torch.stack([torch.cat((torch.tensor(txt).to('cpu'), torch.tensor([TRG.vocab.stoi[TRG.eos_token]]+([TRG.vocab.stoi[TRG.pad_token]] * (max_len_trg - len(txt)))).long().to('cpu'))) for txt in trg_])
     '''init token'''
-    padded_trg = torch.cat((torch.tensor([[TRG.vocab.stoi[TRG.init_token]]] * len(data)), padded_trg), dim=1)
+    padded_trg = torch.cat((torch.tensor([[TRG.vocab.stoi[TRG.init_token]]] * len(data)).to('cpu'), padded_trg), dim=1)
+    max_len_sentence = max(max_len_sentence, len(padded_src[0]), len(padded_trg[0]))
+    return [(s,t) for s,t in zip(padded_src, padded_trg)]
+    # return padded_src, padded_trg
 
-    return padded_src, padded_trg
+def chunker(data, batch_size):
+    result = []
+    for i in range(0, len(data), batch_size):
+       result += [pad_data(data[i:i+batch_size]) for i in range(i, i+batch_size)] 
+    return result
+
+st = utils.time.time()
+
+train_ds = pad_data(train_ds)
+valid_ds = pad_data(valid_ds)
+test_ds = pad_data(test_ds)
+
+et = utils.time.time()
+
+m, s = utils.epoch_time(st, et)
+print(f"data is ready | time : {m}m {s}s")
+sys.stdout.flush()
 
 # sampler = BySequenceLengthSampler(train_ds, bucket_boundaries, hparams.batch_size)
-train_loader = DataLoader(train_ds, batch_size=hparams.batch_size, collate_fn=pad_data, num_workers=0)
-valid_loader = DataLoader(valid_ds, batch_size=hparams.batch_size, collate_fn=pad_data, num_workers=0, shuffle=True)
-test_loader = DataLoader(test_ds, batch_size=hparams.batch_size, collate_fn=pad_data, num_workers=0, shuffle=True)
+train_loader = DataLoader(train_ds, batch_size=hparams.batch_size, num_workers=4, pin_memory=True)
+valid_loader = DataLoader(valid_ds, batch_size=hparams.batch_size, num_workers=0, pin_memory=True)
+test_loader = DataLoader(test_ds, batch_size=hparams.batch_size, num_workers=0, pin_memory=True)
 
 # example
 # for i, batch in enumerate(dataloader):
@@ -269,11 +313,12 @@ for word in list(SRC.vocab.stoi.keys()):
     if word in src_glove.dictionary:
         src_embed_mtrx[SRC.vocab.stoi[word]] = torch.tensor(src_glove.word_vectors[src_glove.dictionary[word]].copy()).to(device)
 
-for word in list(SRC.vocab.stoi.keys()):
+for word in list(TRG.vocab.stoi.keys()):
     if word in trg_glove.dictionary:
         trg_embed_mtrx[SRC.vocab.stoi[word]] = torch.tensor(trg_glove.word_vectors[trg_glove.dictionary[word]].copy()).to(device)
 
 print("pretrained word embeddings loaded")
+sys.stdout.flush()
 
 '''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
 positional encoding
@@ -290,6 +335,7 @@ def get_sinusoid_encoding_table(t_seq, d_model):
     sinusoid_table[:, 1::2] = np.cos(sinusoid_table[:, 1::2])
     return sinusoid_table
 
+sinusoid_encoding_table = torch.FloatTensor(get_sinusoid_encoding_table(max_len_sentence, hparams.d_model)).to(device)
 '''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
 Self Attention
 '''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
@@ -404,7 +450,7 @@ class TransformerEncoder(nn.Module):
 
         self.device = device
 
-        self.tok_embedding = nn.Embedding(input_dim, d_model).requires_grad_(False).to(self.device)
+        self.tok_embedding = nn.Embedding(input_dim, d_model).from_pretrained(src_embed_mtrx).requires_grad_(False).to(self.device)
         self.layers = nn.ModuleList([TransformerEncoderLayer(d_k=d_k,
                                                              d_v=d_v,
                                                              d_model=d_model,
@@ -423,11 +469,11 @@ class TransformerEncoder(nn.Module):
 
         # pos = torch.arange(0, src_len).unsqueeze(0).repeat(batch_size, 1).to(self.device)
         src = self.dropout(self.tok_embedding(src))
-        pe = torch.FloatTensor(get_sinusoid_encoding_table(src_len, src.shape[2])).to(self.device)
+        # pe = get_sinusoid_encoding_table(src_len, src.shape[2], self.device)
         # +positional encoding
         with torch.no_grad():
-            src += pe
-        del pe
+            src += sinusoid_encoding_table[:src_len, :]
+        # del pe
         # src: [batch_size, src_len, d_model]
         for layer in self.layers:
             src = layer(src, src_mask)
@@ -490,7 +536,7 @@ class TransformerDecoder(nn.Module):
         super().__init__()
         self.device = device
 
-        self.tok_embedding = nn.Embedding(output_dim, d_model).requires_grad_(False)
+        self.tok_embedding = nn.Embedding(output_dim, d_model).from_pretrained(trg_embed_mtrx).requires_grad_(False).to(self.device)
         self.layers = nn.ModuleList([TransformerDecoderLayer(d_k=d_k,
                                                              d_v=d_v,
                                                              d_model=d_model,
@@ -509,12 +555,12 @@ class TransformerDecoder(nn.Module):
         # pos = torch.arange(0, trg_len).unsqueeze(0).repeat(batch_size, 1).to(self.device)
         # pos: [batch_size, trg_len]
         trg = self.dropout(self.tok_embedding(trg))
-        pe = torch.FloatTensor(get_sinusoid_encoding_table(trg_len, trg.shape[2])).to(self.device)
+        # pe = get_sinusoid_encoding_table(trg_len, trg.shape[2], self.device)
 
         '''+positional encoding'''
         with torch.no_grad():
-            trg += pe 
-        del pe
+            trg += sinusoid_encoding_table[:trg_len, :] 
+        # del pe
         # trg: [batch_size, trg_len, d_model]
 
         for layer in self.layers:
@@ -539,16 +585,16 @@ class Transformer(nn.Module):
 
     def make_src_mask(self, src):
         # src: [batch_size, src_len]
-        src_mask = (src != self.src_pad_idx).unsqueeze(1).unsqueeze(2)
+        src_mask = (src != self.src_pad_idx).unsqueeze(1).unsqueeze(2).to(self.device)
         # src_mask: [batch_size, 1, 1, src_len]
         return src_mask
 
     def make_trg_mask(self, trg):
         # trg: [batch_size, trg_len]
-        trg_pad_mask = (trg != self.trg_pad_idx).unsqueeze(1).unsqueeze(2)
+        trg_pad_mask = (trg != self.trg_pad_idx).unsqueeze(1).unsqueeze(2).to(self.device)
         # trg_pad_mask = [batch_size, 1, 1, trg_len]
         trg_len = trg.shape[1]
-        trg_attn_mask = torch.tril(torch.ones((trg_len, trg_len), device=self.device)).bool()
+        trg_attn_mask = torch.tril(torch.ones((trg_len, trg_len), device=self.device)).bool().to(self.device)
         # trg_attn_mask = [trg_len, trg_len]
         trg_mask = trg_pad_mask & trg_attn_mask
         return trg_mask
@@ -654,8 +700,9 @@ class LabelSmoothingLoss(nn.Module):
             true_dist.fill_(self.smoothing / (self.cls - 1))
             true_dist.scatter_(1, target.data.unsqueeze(1), self.confidence)
             true_dist.masked_fill_((target == self.ignore_index).unsqueeze(1), 0)
+            true_len = len([i for i in target if i!=self.ignore_index])
 
-        return torch.mean(torch.sum(-true_dist * pred, dim=self.dim))
+        return torch.sum(torch.sum(-true_dist * pred, dim=self.dim)) / true_len
 
 '''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
 Preparing for Training
@@ -696,6 +743,7 @@ model = Transformer(encoder=enc,
 if os.path.isfile(model_filepath):
     model.load_state_dict(torch.load(model_filepath))
     print('model loaded from saved file')
+    sys.stdout.flush()
 else:
     model.apply(utils.initalize_weights)
 
@@ -711,7 +759,7 @@ scheduler = optim.lr_scheduler.LambdaLR(optimizer=optimizer,
                                         verbose=False)
 
 # loss_fn = nn.CrossEntropyLoss(ignore_index=TRG_PAD_IDX)
-loss_fn = LabelSmoothingLoss(smoothing=hparams.label_smoothing, classes=len(TRG.vocab.stoi), ignore_index=TRG_PAD_IDX)
+loss_fn = LabelSmoothingLoss(smoothing=hparams.label_smoothing, classes=len(TRG.vocab.stoi), ignore_index=TRG_PAD_IDX).to(device)
 
 best_valid_loss = float('inf')
 
@@ -735,15 +783,15 @@ def train_model(model, iterator, optimizer, loss_fn, epoch_num, iter_part=150):
     part_start_time = utils.time.time()
 
     for i, batch in enumerate(iterator):
-        src = batch[0]
-        trg = batch[1]
+        src = batch[0].to(device)
+        trg = batch[1].to(device)
 
         '''for bucketiterator users'''
         # src = batch.src
         # trg = batch.trg
         ''''''''''''''''''''''''''''''
 
-        optimizer.zero_grad()
+        optimizer.zero_grad(set_to_none=True)
 
         '''exclude <eos> for decoder input'''
         output, _ = model(src, trg[:, :-1])
@@ -773,13 +821,16 @@ def train_model(model, iterator, optimizer, loss_fn, epoch_num, iter_part=150):
         '''part log part'''
         if (i+1) % iter_part == 0:
             print(f'{total_length if (i+1)*hparams.batch_size > total_length else (i+1)*hparams.batch_size} / {total_length}, part {current_part} / {total_parts} complete...')
-            valid_loss = evaluate_model(model, valid_iterator, loss_fn)
+            part_end_time = utils.time.time()
+            part_mins, part_secs = utils.epoch_time(part_start_time, part_end_time)
+            print(f'Part Train Loss: {epoch_loss / (i+1):.3f} | Part Train PPL: {utils.math.exp(epoch_loss / (i+1)):.3f} | Time : {part_mins}m {part_secs}s')
+            sys.stdout.flush()
+            valid_loss = evaluate_model(model, valid_loader, loss_fn)
+            print(f'Validation Loss: {valid_loss:.3f} | Validation PPL: {utils.math.exp(valid_loss):.3f}')
             if valid_loss < best_valid_loss:
                 best_valid_loss = valid_loss
                 torch.save(model.state_dict(), f'{model_name}.pt')
-                print('model saved')
-            print(f'Part Train Loss: {epoch_loss / (i+1):.3f} | Part Train PPL: {utils.math.exp(epoch_loss / (i+1)):.3f}')
-            print(f'Validation Loss: {valid_loss:.3f} | Validation PPL: {utils.math.exp(valid_loss):.3f}')
+                print(f'model saved at {model_name}')
             # show_bleu(test, SRC, TRG, model, device) '''show_bleu is too slow'''
             part_end_time = utils.time.time()
             part_mins, part_secs = utils.epoch_time(part_start_time, part_end_time)

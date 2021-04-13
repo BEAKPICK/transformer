@@ -5,9 +5,8 @@ n_heads = 8
 n_encoder = 6 
 n_decoder = 6 
 d_ff = 2048
-batch_size = 32 
-
+batch_size = 25 
+label_smoothing = 0.1
 dropout_ratio = 0.1
 learning_rate = 0.0005
-
-n_epochs = 10
+n_epochs = 90

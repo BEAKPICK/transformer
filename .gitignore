@@ -36,6 +36,10 @@ torchtext/
 *.pt
 gluon_type/
 nmt/
+*.sh
+*.pickle
+*.swp
+*.out
 
 # PyInstaller
 #  Usually these files are written by a python script from a template
