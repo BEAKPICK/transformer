@@ -14,10 +14,9 @@ imports
 import torch
 import torch.optim as optim
 import torch.nn as nn
-import torch.nn.functional as F
-from torch.autograd import Variable
-from torch.nn.modules.loss import _WeightedLoss
 from torch.utils.data import DataLoader, BatchSampler, RandomSampler, Sampler
+
+from torch.nn.parallel.distributed import DistributedDataParallel
 from parallel import DataParallelModel, DataParallelCriterion
 
 import torchtext
@@ -27,12 +26,14 @@ import spacy # for tokenizer
 from gensim.models import Word2Vec
 from glove import Glove
 import glove
-import numpy as np
 
+import numpy as np
 import sys
 import os
 import os.path
 import random
+import pickle
+import gzip
 
 import hyperparameters_pytorch as hparams
 import customutils_pytorch as utils
@@ -46,9 +47,17 @@ preparing data and environment
 sample_valid_size = 300
 sample_test_size = 50
 
-model_name = 'transformer_en_de_gl_2'
+model_name = 'transformer_en_de_gl_3'
 model_filepath = f'{os.getcwd()}/{model_name}.pt'
 vocab_filepath = f'{os.getcwd()}/.data/wmt14/vocab.bpe.32000'
+
+saved_train_path = f'{os.getcwd()}/.data/wmt14/saved_train.pickle'
+saved_valid_path = f'{os.getcwd()}/.data/wmt14/saved_valid.pickle'
+saved_test_path = f'{os.getcwd()}/.data/wmt14/saved_test.pickle'
+
+saved_train_pad_path = f'{os.getcwd()}/saved_train_pad.pickle'
+saved_valid_pad_path = f'{os.getcwd()}/saved_valid_pad.pickle'
+saved_test_pad_path = f'{os.getcwd()}/saved_test_pad.pickle'
 
 device = torch.device('cuda:1' if torch.cuda.is_available() else 'cpu')
 
@@ -78,12 +87,30 @@ TRG = Field(tokenize = tokenize_de,
             batch_first=True)
 
 st = utils.time.time()
-train, valid, test = torchtext.datasets.WMT14.splits(exts=('.en', '.de'),
-                                                     fields=(SRC, TRG))
+if os.path.isfile(saved_train_path):
+    train, valid, test = torchtext.datasets.WMT14.splits(exts=('.en', '.de'), fields=(SRC, TRG),
+	                                                     train='dummy', validation='dummy', test='dummy')
+    with gzip.open(saved_train_path, 'rb') as f:
+        train.examples = pickle.load(f)
+    with gzip.open(saved_valid_path, 'rb') as f:
+        valid.examples = pickle.load(f)
+    with gzip.open(saved_test_path, 'rb') as f:
+        test.examples = pickle.load(f)
 
+else:
+    train, valid, test = torchtext.datasets.WMT14.splits(exts=('.en', '.de'),
+                                                     fields=(SRC, TRG))
+    with gzip.open(saved_train_path, 'wb') as f:
+        pickle.dump(train.examples, f)
+    with gzip.open(saved_valid_path, 'wb') as f:
+        pickle.dump(valid.examples, f)
+    with gzip.open(saved_test_path, 'wb') as f:
+        pickle.dump(test.examples, f)
+
+# reduce size of data to save time
 # train.examples = random.sample(train.examples, sample_valid_size)
 # valid.examples = random.sample(valid.examples, sample_valid_size)
-test.examples = random.sample(test.examples, sample_test_size)
+# test.examples = random.sample(test.examples, sample_test_size)
 
 et = utils.time.time()
 m, s = utils.epoch_time(st, et)
@@ -98,7 +125,7 @@ st = utils.time.time()
 
 if os.path.isfile(vocab_filepath):
     with open(vocab_filepath, 'r', encoding='utf-8') as f:
-        vocablist = [i for i in f.read().split('\n') ]
+        vocablist = [i for i in f.read().split('\n')]
     print('src vocab_file loaded')
     sys.stdout.flush()
     SRC.build_vocab(train, valid, test, [vocablist])
@@ -256,9 +283,29 @@ def chunker(data, batch_size):
 
 st = utils.time.time()
 
-train_ds = pad_data(train_ds)
-valid_ds = pad_data(valid_ds)
-test_ds = pad_data(test_ds)
+if os.path.isfile(saved_train_pad_path):
+    with gzip.open(saved_train_pad_path, 'rb') as f:
+        train_ds = pickle.load(f)
+else:
+    train_ds = pad_data(train_ds)
+    with gzip.open(saved_train_pad_path, 'wb') as f:
+        pickle.dump(train_ds, f)
+
+if os.path.isfile(saved_valid_pad_path):
+    with gzip.open(saved_valid_pad_path, 'rb') as f:
+        valid_ds = pickle.load(f)
+else:
+    valid_ds = pad_data(valid_ds)
+    with gzip.open(saved_valid_pad_path, 'wb') as f:
+        pickle.dump(valid_ds, f)
+
+if os.path.isfile(saved_test_pad_path):
+    with gzip.open(saved_test_pad_path, 'rb') as f:
+        test_ds = pickle.load(f)
+else:
+    test_ds = pad_data(test_ds)
+    with gzip.open(saved_test_pad_path, 'wb') as f:
+        pickle.dump(test_ds, f)
 
 et = utils.time.time()
 
@@ -268,8 +315,8 @@ sys.stdout.flush()
 
 # sampler = BySequenceLengthSampler(train_ds, bucket_boundaries, hparams.batch_size)
 train_loader = DataLoader(train_ds, batch_size=hparams.batch_size, num_workers=4, pin_memory=True)
-valid_loader = DataLoader(valid_ds, batch_size=hparams.batch_size, num_workers=0, pin_memory=True)
-test_loader = DataLoader(test_ds, batch_size=hparams.batch_size, num_workers=0, pin_memory=True)
+valid_loader = DataLoader(valid_ds, batch_size=hparams.batch_size, num_workers=4, pin_memory=True)
+test_loader = DataLoader(test_ds, batch_size=hparams.batch_size, num_workers=4, pin_memory=True)
 
 # example
 # for i, batch in enumerate(dataloader):
@@ -335,7 +382,23 @@ def get_sinusoid_encoding_table(t_seq, d_model):
     sinusoid_table[:, 1::2] = np.cos(sinusoid_table[:, 1::2])
     return sinusoid_table
 
-sinusoid_encoding_table = torch.FloatTensor(get_sinusoid_encoding_table(max_len_sentence, hparams.d_model)).to(device)
+# sinusoid_encoding_table = torch.FloatTensor(get_sinusoid_encoding_table(max_len_sentence, hparams.d_model)).to(device)
+class PositionalEncoding(nn.Module):
+    def __init__(self, t_seq, d_model, device):
+        super().__init__()
+        self.device = device
+        self.sinusoid_table = torch.FloatTensor(get_sinusoid_encoding_table(t_seq, d_model)).to(0)
+        self.sinusoid_table2 = torch.FloatTensor(get_sinusoid_encoding_table(t_seq, d_model)).to(1)
+
+    def forward(self, x):
+        x_len = x.shape[1]
+        loc = x.get_device()
+        with torch.no_grad():
+            if loc == 0:
+                result = torch.add(x, self.sinusoid_table[:x_len, :])
+            elif loc == 1:
+                result = torch.add(x, self.sinusoid_table2[:x_len, :])
+        return result
 '''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
 Self Attention
 '''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
@@ -451,6 +514,7 @@ class TransformerEncoder(nn.Module):
         self.device = device
 
         self.tok_embedding = nn.Embedding(input_dim, d_model).from_pretrained(src_embed_mtrx).requires_grad_(False).to(self.device)
+        self.positional_encoding = PositionalEncoding(max_len_sentence, hparams.d_model, self.device)
         self.layers = nn.ModuleList([TransformerEncoderLayer(d_k=d_k,
                                                              d_v=d_v,
                                                              d_model=d_model,
@@ -471,8 +535,7 @@ class TransformerEncoder(nn.Module):
         src = self.dropout(self.tok_embedding(src))
         # pe = get_sinusoid_encoding_table(src_len, src.shape[2], self.device)
         # +positional encoding
-        with torch.no_grad():
-            src += sinusoid_encoding_table[:src_len, :]
+        src = self.positional_encoding(src).to(self.device)
         # del pe
         # src: [batch_size, src_len, d_model]
         for layer in self.layers:
@@ -537,6 +600,7 @@ class TransformerDecoder(nn.Module):
         self.device = device
 
         self.tok_embedding = nn.Embedding(output_dim, d_model).from_pretrained(trg_embed_mtrx).requires_grad_(False).to(self.device)
+        self.positional_encoding = PositionalEncoding(max_len_sentence, hparams.d_model, self.device)
         self.layers = nn.ModuleList([TransformerDecoderLayer(d_k=d_k,
                                                              d_v=d_v,
                                                              d_model=d_model,
@@ -556,10 +620,12 @@ class TransformerDecoder(nn.Module):
         # pos: [batch_size, trg_len]
         trg = self.dropout(self.tok_embedding(trg))
         # pe = get_sinusoid_encoding_table(trg_len, trg.shape[2], self.device)
+        trg = self.positional_encoding(trg).to(self.device)
 
-        '''+positional encoding'''
-        with torch.no_grad():
-            trg += sinusoid_encoding_table[:trg_len, :] 
+        # '''+positional encoding'''
+        # with torch.no_grad():
+        #     trg += sinusoid_encoding_table[:trg_len, :] 
+
         # del pe
         # trg: [batch_size, trg_len, d_model]
 
@@ -741,7 +807,7 @@ model = Transformer(encoder=enc,
                     device=device).to(device)
 
 if os.path.isfile(model_filepath):
-    model.load_state_dict(torch.load(model_filepath))
+    model.load_state_dict(torch.load(model_filepath, map_location=device))
     print('model loaded from saved file')
     sys.stdout.flush()
 else:
@@ -751,7 +817,7 @@ print(f'The model has {utils.count_parameters(model):,} trainable parameters')
 sys.stdout.flush()
 
 '''set optimizer, scheduler and loss function'''
-optimizer = torch.optim.Adam(model.parameters(), betas=(0.9, 0.98), lr=hparams.learning_rate)
+optimizer = torch.optim.Adam(model.parameters(), betas=(0.9, 0.98), eps=1e-09, lr=hparams.learning_rate)
 warmup_steps = 4000
 scheduler = optim.lr_scheduler.LambdaLR(optimizer=optimizer,
                                         lr_lambda=lambda steps:(hparams.d_model**(-0.5))*min((steps+1)**(-0.5), (steps+1)*warmup_steps**(-1.5)),
@@ -759,7 +825,12 @@ scheduler = optim.lr_scheduler.LambdaLR(optimizer=optimizer,
                                         verbose=False)
 
 # loss_fn = nn.CrossEntropyLoss(ignore_index=TRG_PAD_IDX)
-loss_fn = LabelSmoothingLoss(smoothing=hparams.label_smoothing, classes=len(TRG.vocab.stoi), ignore_index=TRG_PAD_IDX).to(device)
+loss_fn = LabelSmoothingLoss(smoothing=hparams.label_smoothing, classes=len(TRG.vocab.stoi), ignore_index=TRG_PAD_IDX)
+
+# parallel_model = DataParallelModel(model, device_ids=[0,1])
+# parallel_model.to(device)
+# parallel_loss = DataParallelCriterion(loss_fn, device_ids=[0,1])
+# parallel_loss.to(device)
 
 best_valid_loss = float('inf')
 
@@ -783,8 +854,8 @@ def train_model(model, iterator, optimizer, loss_fn, epoch_num, iter_part=150):
     part_start_time = utils.time.time()
 
     for i, batch in enumerate(iterator):
-        src = batch[0].to(device)
-        trg = batch[1].to(device)
+        src = batch[0].to(device, non_blocking=True)
+        trg = batch[1].to(device, non_blocking=True)
 
         '''for bucketiterator users'''
         # src = batch.src
@@ -794,6 +865,7 @@ def train_model(model, iterator, optimizer, loss_fn, epoch_num, iter_part=150):
         optimizer.zero_grad(set_to_none=True)
 
         '''exclude <eos> for decoder input'''
+        # output, _ = model(src, trg[:, :-1])
         output, _ = model(src, trg[:, :-1])
         # output: [batch_size, trg_len-1, output_dim]
 
@@ -805,7 +877,8 @@ def train_model(model, iterator, optimizer, loss_fn, epoch_num, iter_part=150):
         trg = trg[:,1:].contiguous().view(-1)
         # trg: [batch_size*trg_len-1]
 
-        loss = loss_fn(output, trg)
+        # loss = loss_fn(output, trg)
+        loss = loss_fn(noutput, trg)
         loss.backward()
 
         '''graident clipping'''
@@ -851,8 +924,8 @@ def evaluate_model(model, iterator, loss_fn):
 
     with torch.no_grad():
         for i, batch in enumerate(iterator):
-            src = batch[0].to(device)
-            trg = batch[1].to(device)
+            src = batch[0].to(device, non_blocking=True)
+            trg = batch[1].to(device, non_blocking=True)
 
             output, _ = model(src, trg[:, :-1])
 
@@ -930,8 +1003,8 @@ Training
 '''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
 for epoch in range(hparams.n_epochs):
     start_time = utils.time.time()
-    train_loss = train_model(model, train_loader, optimizer, loss_fn, epoch)
-    valid_loss = evaluate_model(model, valid_loader, loss_fn)
+    train_loss = train_model(model, train_loader, optimizer, parallel_loss, epoch)
+    valid_loss = evaluate_model(model, valid_loader, parallel_loss)
     end_time = utils.time.time()
     epoch_mins, epoch_secs = utils.epoch_time(start_time, end_time)
 
