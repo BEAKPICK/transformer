@@ -42,7 +42,7 @@ import hyperparameters_pytorch as hparams
 import customutils_pytorch as utils
 
 '''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
-preparing data and environment
+preparing data and environment with global variences
 
 # torchtext==0.6.0
 '''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
@@ -70,6 +70,14 @@ spacy_de = spacy.load('de_core_news_sm')
 
 share_vocab = True
 
+SRC, TRG = None, None
+train, valid, test = None, None, None
+train_ds, valid_ds, test_ds = None, None, None
+src_embed_mtrx, trg_embed_mtrx = None, None, None
+
+'''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
+'''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
+
 def tokenize_en(text):
     return [token.text for token in spacy_en.tokenizer(text)]
 
@@ -77,94 +85,96 @@ def tokenize_de(text):
     return [token.text for token in spacy_de.tokenizer(text)]
 
 '''load data'''
+def pre_process():
+    global SRC, TRG, train, valid, test
 
-SRC = Field(tokenize = tokenize_en,
-            init_token='<sos>',
-            eos_token='<eos>',
-            lower=True,
-            batch_first=True)
+    SRC = Field(tokenize = tokenize_en,
+                init_token='<sos>',
+                eos_token='<eos>',
+                lower=True,
+                batch_first=True)
 
-TRG = Field(tokenize = tokenize_de,
-            init_token='<sos>',
-            eos_token='<eos>',
-            lower=True,
-            batch_first=True)
+    TRG = Field(tokenize = tokenize_de,
+                init_token='<sos>',
+                eos_token='<eos>',
+                lower=True,
+                batch_first=True)
 
-st = utils.time.time()
-if os.path.isfile(saved_train_path):
-    train, valid, test = torchtext.datasets.WMT14.splits(exts=('.en', '.de'), fields=(SRC, TRG),
-	                                                     train='dummy', validation='dummy', test='dummy')
-    with gzip.open(saved_train_path, 'rb') as f:
-        train.examples = pickle.load(f)
-    with gzip.open(saved_valid_path, 'rb') as f:
-        valid.examples = pickle.load(f)
-    with gzip.open(saved_test_path, 'rb') as f:
-        test.examples = pickle.load(f)
+    st = utils.time.time()
+    if os.path.isfile(saved_train_path):
+        train, valid, test = torchtext.datasets.WMT14.splits(exts=('.en', '.de'), fields=(SRC, TRG),
+                                                             train='dummy', validation='dummy', test='dummy')
+        with gzip.open(saved_train_path, 'rb') as f:
+            train.examples = pickle.load(f)
+        with gzip.open(saved_valid_path, 'rb') as f:
+            valid.examples = pickle.load(f)
+        with gzip.open(saved_test_path, 'rb') as f:
+            test.examples = pickle.load(f)
 
-else:
-    train, valid, test = torchtext.datasets.WMT14.splits(exts=('.en', '.de'),
-                                                     fields=(SRC, TRG))
-    with gzip.open(saved_train_path, 'wb') as f:
-        pickle.dump(train.examples, f)
-    with gzip.open(saved_valid_path, 'wb') as f:
-        pickle.dump(valid.examples, f)
-    with gzip.open(saved_test_path, 'wb') as f:
-        pickle.dump(test.examples, f)
+    else:
+        train, valid, test = torchtext.datasets.WMT14.splits(exts=('.en', '.de'),
+                                                             fields=(SRC, TRG))
+        with gzip.open(saved_train_path, 'wb') as f:
+            pickle.dump(train.examples, f)
+        with gzip.open(saved_valid_path, 'wb') as f:
+            pickle.dump(valid.examples, f)
+        with gzip.open(saved_test_path, 'wb') as f:
+            pickle.dump(test.examples, f)
 
-# reduce size of data to save time
-# train.examples = random.sample(train.examples, sample_valid_size)
-# valid.examples = random.sample(valid.examples, sample_valid_size)
-# test.examples = random.sample(test.examples, sample_test_size)
+        # reduce size of data to save time
+        # train.examples = random.sample(train.examples, sample_valid_size)
+        # valid.examples = random.sample(valid.examples, sample_valid_size)
+        # test.examples = random.sample(test.examples, sample_test_size)
 
-et = utils.time.time()
-m, s = utils.epoch_time(st, et)
-print(f'data split completed | time : {m}m {s}s')
-sys.stdout.flush()
-
-st = utils.time.time()
-
-if os.path.isfile(vocab_filepath):
-    with open(vocab_filepath, 'r', encoding='utf-8') as f:
-        vocablist = [i for i in f.read().split('\n')]
-    print('src vocab_file loaded')
+    et = utils.time.time()
+    m, s = utils.epoch_time(st, et)
+    print(f'data split completed | time : {m}m {s}s')
     sys.stdout.flush()
-    SRC.build_vocab(train, valid, test, [vocablist])
-else:
-    SRC.build_vocab(train, valid, test)
 
-et = utils.time.time()
-m, s = utils.epoch_time(st, et)
-print(f"SRC build success | time : {m}m {s}s")
-sys.stdout.flush()
+    st = utils.time.time()
 
-st = utils.time.time()
+    if os.path.isfile(vocab_filepath):
+        with open(vocab_filepath, 'r', encoding='utf-8') as f:
+            vocablist = [i for i in f.read().split('\n')]
+        print('src vocab_file loaded')
+        sys.stdout.flush()
+        SRC.build_vocab(train, valid, test, [vocablist])
+    else:
+        SRC.build_vocab(train, valid, test)
 
-if os.path.isfile(vocab_filepath):
-    with open(vocab_filepath, 'r', encoding='utf-8') as f:
-        vocablist = [i for i in f.read().split('\n')]
-    print('trg vocab_file loaded')
+    et = utils.time.time()
+    m, s = utils.epoch_time(st, et)
+    print(f"SRC build success | time : {m}m {s}s")
     sys.stdout.flush()
-    TRG.build_vocab(train, valid, test, [vocablist])
-else:
-    TRG.build_vocab(train, valid, test)
 
-et = utils.time.time()
-m, s = utils.epoch_time(st, et)
-print(f"TRG build success | time : {m}m {s}s")
-sys.stdout.flush()
+    st = utils.time.time()
 
-if share_vocab:
-    print('Merging two vocabulary...')
-    for w, _ in SRC.vocab.stoi.items():
-        if w not in TRG.vocab.stoi:
-            TRG.vocab.stoi[w] = len(TRG.vocab.stoi)
-    TRG.vocab.itos = [None] * len(TRG.vocab.stoi)
-    for w, i in TRG.vocab.stoi.items():
-        TRG.vocab.itos[i] = w
-    SRC.vocab.stoi = TRG.vocab.stoi
-    SRC.vocab.itos = TRG.vocab.itos
-    print('Get merged vocabulary size: ', len(TRG.vocab))
+    if os.path.isfile(vocab_filepath):
+        with open(vocab_filepath, 'r', encoding='utf-8') as f:
+            vocablist = [i for i in f.read().split('\n')]
+        print('trg vocab_file loaded')
+        sys.stdout.flush()
+        TRG.build_vocab(train, valid, test, [vocablist])
+    else:
+        TRG.build_vocab(train, valid, test)
+
+    et = utils.time.time()
+    m, s = utils.epoch_time(st, et)
+    print(f"TRG build success | time : {m}m {s}s")
     sys.stdout.flush()
+
+    if share_vocab:
+        print('Merging two vocabulary...')
+        for w, _ in SRC.vocab.stoi.items():
+            if w not in TRG.vocab.stoi:
+                TRG.vocab.stoi[w] = len(TRG.vocab.stoi)
+        TRG.vocab.itos = [None] * len(TRG.vocab.stoi)
+        for w, i in TRG.vocab.stoi.items():
+            TRG.vocab.itos[i] = w
+        SRC.vocab.stoi = TRG.vocab.stoi
+        SRC.vocab.itos = TRG.vocab.itos
+        print('Get merged vocabulary size: ', len(TRG.vocab))
+        sys.stdout.flush()
 
 '''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
 BucketIterator
@@ -190,66 +200,68 @@ encouraged to use torch.utils.data.DataLoader
 by https://github.com/pytorch/text/issues/664
 '''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
 '''sort by length and pad sequences with similar lengths'''
+def pad_process():
+    global train_ds, valid_ds, test_ds
+    if rank == 1:
+        train_ds = sorted([(len(each.src),
+                            len(each.trg),
+                            [SRC.vocab[i] for i in each.src],
+                            [TRG.vocab[i] for i in each.trg])
+                            for i, each in enumerate(train)], key=lambda data:(data[0], data[1]), reverse=True)
+        valid_ds = sorted([(len(each.src),
+                            len(each.trg),
+                            [SRC.vocab[i] for i in each.src],
+                            [TRG.vocab[i] for i in each.trg])
+                           for i, each in enumerate(valid)], key=lambda data:(data[0], data[1]), reverse=True)
+        test_ds = sorted([(len(each.src),
+                           len(each.trg),
+                           [SRC.vocab[i] for i in each.src],
+                           [TRG.vocab[i] for i in each.trg])
+                          for i, each in enumerate(test)], key=lambda data:(data[0], data[1]), reverse=True)
 
-train_ds = sorted([(len(each.src),
-                    len(each.trg),
-                    [SRC.vocab[i] for i in each.src],
-                    [TRG.vocab[i] for i in each.trg])
-                    for i, each in enumerate(train)], key=lambda data:(data[0], data[1]), reverse=True)
-valid_ds = sorted([(len(each.src),
-                    len(each.trg),
-                    [SRC.vocab[i] for i in each.src],
-                    [TRG.vocab[i] for i in each.trg])
-                   for i, each in enumerate(valid)], key=lambda data:(data[0], data[1]), reverse=True)
-test_ds = sorted([(len(each.src),
-                   len(each.trg),
-                   [SRC.vocab[i] for i in each.src],
-                   [TRG.vocab[i] for i in each.trg])
-                  for i, each in enumerate(test)], key=lambda data:(data[0], data[1]), reverse=True)
+        max_len_sentence = 0
 
-max_len_sentence = 0
+        def pad_data(data):
+            '''Find max length of the mini-batch'''
 
-def pad_data(data):
-    '''Find max length of the mini-batch'''
+            '''look data as column'''
+            global max_len_sentence
 
-    '''look data as column'''
-    global max_len_sentence
+            max_len_trg = max(list(zip(*data))[1])
+            max_len_src = max(list(zip(*data))[0])
+            src_ = list(zip(*data))[2]
+            trg_ = list(zip(*data))[3]
 
-    max_len_trg = max(list(zip(*data))[1])
-    max_len_src = max(list(zip(*data))[0])
-    src_ = list(zip(*data))[2]
-    trg_ = list(zip(*data))[3]
+            '''eos + pad'''
+            padded_src = torch.stack([torch.cat((torch.tensor(txt).to('cpu'), torch.tensor([SRC.vocab.stoi[SRC.eos_token]]+([SRC.vocab.stoi[SRC.pad_token]] * (max_len_src - len(txt)))).long().to('cpu'))) for txt in src_])
+            '''init token'''
+            padded_src = torch.cat((torch.tensor([[SRC.vocab.stoi[SRC.init_token]]] * len(data)).to('cpu'), padded_src), dim=1)
 
-    '''eos + pad'''
-    padded_src = torch.stack([torch.cat((torch.tensor(txt).to('cpu'), torch.tensor([SRC.vocab.stoi[SRC.eos_token]]+([SRC.vocab.stoi[SRC.pad_token]] * (max_len_src - len(txt)))).long().to('cpu'))) for txt in src_])
-    '''init token'''
-    padded_src = torch.cat((torch.tensor([[SRC.vocab.stoi[SRC.init_token]]] * len(data)).to('cpu'), padded_src), dim=1)
+            '''eos + pad'''
+            padded_trg = torch.stack([torch.cat((torch.tensor(txt).to('cpu'), torch.tensor([TRG.vocab.stoi[TRG.eos_token]]+([TRG.vocab.stoi[TRG.pad_token]] * (max_len_trg - len(txt)))).long().to('cpu'))) for txt in trg_])
+            '''init token'''
+            padded_trg = torch.cat((torch.tensor([[TRG.vocab.stoi[TRG.init_token]]] * len(data)).to('cpu'), padded_trg), dim=1)
+            max_len_sentence = max(max_len_sentence, len(padded_src[0]), len(padded_trg[0]))
+            return [(s,t) for s,t in zip(padded_src, padded_trg)]
+            # return padded_src, padded_trg
 
-    '''eos + pad'''
-    padded_trg = torch.stack([torch.cat((torch.tensor(txt).to('cpu'), torch.tensor([TRG.vocab.stoi[TRG.eos_token]]+([TRG.vocab.stoi[TRG.pad_token]] * (max_len_trg - len(txt)))).long().to('cpu'))) for txt in trg_])
-    '''init token'''
-    padded_trg = torch.cat((torch.tensor([[TRG.vocab.stoi[TRG.init_token]]] * len(data)).to('cpu'), padded_trg), dim=1)
-    max_len_sentence = max(max_len_sentence, len(padded_src[0]), len(padded_trg[0]))
-    return [(s,t) for s,t in zip(padded_src, padded_trg)]
-    # return padded_src, padded_trg
+        # def chunker(data, batch_size):
+        #     result = []
+        #     for i in range(0, len(data), batch_size):
+        #        result += [pad_data(data[i:i+batch_size]) for i in range(i, i+batch_size)]
+        #     return result
 
-# def chunker(data, batch_size):
-#     result = []
-#     for i in range(0, len(data), batch_size):
-#        result += [pad_data(data[i:i+batch_size]) for i in range(i, i+batch_size)]
-#     return result
+        st = utils.time.time()
 
-st = utils.time.time()
+        train_ds = pad_data(train_ds)
+        valid_ds = pad_data(valid_ds)
+        test_ds = pad_data(test_ds)
 
-train_ds = pad_data(train_ds)
-valid_ds = pad_data(valid_ds)
-test_ds = pad_data(test_ds)
+        et = utils.time.time()
 
-et = utils.time.time()
-
-m, s = utils.epoch_time(st, et)
-print(f"data is ready | time : {m}m {s}s")
-sys.stdout.flush()
+        m, s = utils.epoch_time(st, et)
+        print(f"data is ready | time : {m}m {s}s")
+        sys.stdout.flush()
 
 # sampler = BySequenceLengthSampler(train_ds, bucket_boundaries, hparams.batch_size)
 # train_loader = DataLoader(train_ds, batch_size=hparams.batch_size, num_workers=4, pin_memory=True)
@@ -278,45 +290,48 @@ def cleanup():
 '''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
 embedding
 '''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
-src_vocabsize = len(SRC.vocab.stoi)
-trg_vocabsize = len(TRG.vocab.stoi)
+def embed_process():
+    global src_embed_mtrx, trg_embed_mtrx
 
-src_embed_mtrx = torch.randn(src_vocabsize, hparams.d_model).to(device)
-trg_embed_mtrx = torch.randn(trg_vocabsize, hparams.d_model).to(device)
+    src_vocabsize = len(SRC.vocab.stoi)
+    trg_vocabsize = len(TRG.vocab.stoi)
 
-'''
-for word2vec
-'''
-# src_word2vec = Word2Vec.load('src_embedd.model')
-# trg_word2vec = Word2Vec.load('trg_embedd.model')
+    src_embed_mtrx = torch.randn(src_vocabsize, hparams.d_model).to(device)
+    trg_embed_mtrx = torch.randn(trg_vocabsize, hparams.d_model).to(device)
 
-# for i in range(src_vocabsize):
-#     word = list(SRC.vocab.stoi.keys())[i]
-#     if word in src_word2vec.wv.index2word:
-#         src_embed_mtrx[SRC.vocab.stoi[word]] = torch.tensor(src_word2vec.wv[word].copy()).to(device)
-#
-# for i in range(trg_vocabsize):
-#     word = list(TRG.vocab.stoi.keys())[i]
-#     if word in trg_word2vec.wv.index2word:
-#         trg_embed_mtrx[TRG.vocab.stoi[word]] = torch.tensor(trg_word2vec.wv[word].copy()).to(device)
+    '''
+        for word2vec
+        '''
+    # src_word2vec = Word2Vec.load('src_embedd.model')
+    # trg_word2vec = Word2Vec.load('trg_embedd.model')
 
-'''
-for glove
-'''
-glove = Glove()
-src_glove = glove.load('src_glove.model')
-trg_glove = glove.load('trg_glove.model')
+    # for i in range(src_vocabsize):
+    #     word = list(SRC.vocab.stoi.keys())[i]
+    #     if word in src_word2vec.wv.index2word:
+    #         src_embed_mtrx[SRC.vocab.stoi[word]] = torch.tensor(src_word2vec.wv[word].copy()).to(device)
+    #
+    # for i in range(trg_vocabsize):
+    #     word = list(TRG.vocab.stoi.keys())[i]
+    #     if word in trg_word2vec.wv.index2word:
+    #         trg_embed_mtrx[TRG.vocab.stoi[word]] = torch.tensor(trg_word2vec.wv[word].copy()).to(device)
 
-for word in list(SRC.vocab.stoi.keys()):
-    if word in src_glove.dictionary:
-        src_embed_mtrx[SRC.vocab.stoi[word]] = torch.tensor(src_glove.word_vectors[src_glove.dictionary[word]].copy()).to(device)
+    '''
+    for glove
+    '''
+    glove = Glove()
+    src_glove = glove.load('src_glove.model')
+    trg_glove = glove.load('trg_glove.model')
 
-for word in list(TRG.vocab.stoi.keys()):
-    if word in trg_glove.dictionary:
-        trg_embed_mtrx[SRC.vocab.stoi[word]] = torch.tensor(trg_glove.word_vectors[trg_glove.dictionary[word]].copy()).to(device)
+    for word in list(SRC.vocab.stoi.keys()):
+        if word in src_glove.dictionary:
+            src_embed_mtrx[SRC.vocab.stoi[word]] = torch.tensor(src_glove.word_vectors[src_glove.dictionary[word]].copy()).to(device)
 
-print("pretrained word embeddings loaded")
-sys.stdout.flush()
+    for word in list(TRG.vocab.stoi.keys()):
+        if word in trg_glove.dictionary:
+            trg_embed_mtrx[SRC.vocab.stoi[word]] = torch.tensor(trg_glove.word_vectors[trg_glove.dictionary[word]].copy()).to(device)
+
+    print("pretrained word embeddings loaded")
+    sys.stdout.flush()
 
 '''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
 positional encoding
@@ -931,7 +946,21 @@ def translate_sentence(sentence, SRC, TRG, model, device, max_len=50, logging=Fa
 '''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
 Training
 '''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
-def train_fn(rank, world_size):
+def total_process(rank, world_size):
+
+    global SRC, TRG, train, valid, test
+    global train_ds, valid_ds, test_ds
+
+    sign = torch.zeros(1)
+    req = None
+    if rank == 0:
+        pre_process()
+        pad_process()
+        req = dist.isend(tensor=sign, dst=1)
+    elif rank == 1:
+        embed_process()
+        req = dist.irecv(tensor=sign, src=0)
+    req.wait()
 
     '''''''''''''''set up'''''''''''''''
     print(f"Running basic DDP example on rank {rank}.")
@@ -942,9 +971,9 @@ def train_fn(rank, world_size):
     sampler_valid = DistributedSampler(valid_ds, num_replicas=world_size, rank=rank)
     # sampler_test = DistributedSampler(test_ds, num_replicas=world_size, rank=rank)
 
-    train_loader = DataLoader(train_ds, batch_size=hparams.batch_size, num_workers=1, sampler=sampler_train, pin_memory=True)
-    valid_loader = DataLoader(valid_ds, batch_size=hparams.batch_size, num_workers=1, sampler=sampler_valid, pin_memory=True)
-    # test_loader = DataLoader(test_ds, batch_size=hparams.batch_size, num_workers=1, sampler=sampler_test, pin_memory=True)
+    train_loader = DataLoader(train_ds, batch_size=hparams.batch_size, num_workers=0, sampler=sampler_train, pin_memory=True)
+    valid_loader = DataLoader(valid_ds, batch_size=hparams.batch_size, num_workers=0, sampler=sampler_valid, pin_memory=True)
+    # test_loader = DataLoader(test_ds, batch_size=hparams.batch_size, num_workers=0, sampler=sampler_test, pin_memory=True)
 
     enc = TransformerEncoder(input_dim=INPUT_DIM,
                              d_k=hparams.d_k,
@@ -954,7 +983,7 @@ def train_fn(rank, world_size):
                              n_heads=hparams.n_heads,
                              d_ff=hparams.d_ff,
                              dropout_ratio=hparams.dropout_ratio,
-                             device=device).to(device)
+                             device=rank).to(rank)
 
     dec = TransformerDecoder(output_dim=OUTPUT_DIM,
                              d_k=hparams.d_k,
@@ -964,13 +993,13 @@ def train_fn(rank, world_size):
                              n_heads=hparams.n_heads,
                              d_ff=hparams.d_ff,
                              dropout_ratio=hparams.dropout_ratio,
-                             device=device).to(device)
+                             device=rank).to(rank)
 
     model = Transformer(encoder=enc,
                         decoder=dec,
                         src_pad_idx=SRC_PAD_IDX,
                         trg_pad_idx=TRG_PAD_IDX,
-                        device=device)
+                        device=rank)
 
     model.to(rank)
     load_init_model(model, model_filepath, rank)
@@ -1025,7 +1054,7 @@ def main():
     parser.add_argument('--gpus', default=1, type=int, help='number of gpus per node')
     args = parser.parse_args()
     world_size = args.gpus
-    mp.spawn(train_fn, args=(world_size,), nprocs=world_size, join=True)
+    mp.spawn(total_process, args=(world_size,), nprocs=world_size, join=True)
 
 '''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
 Generation Test
