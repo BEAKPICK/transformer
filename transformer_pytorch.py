@@ -14,10 +14,11 @@ imports
 import torch
 import torch.optim as optim
 import torch.nn as nn
-from torch.utils.data import DataLoader, BatchSampler, RandomSampler, Sampler
+from torch.utils.data import DataLoader, BatchSampler, RandomSampler, Sampler, DistributedSampler
 
-from torch.nn.parallel.distributed import DistributedDataParallel
-from parallel import DataParallelModel, DataParallelCriterion
+from torch.nn.parallel.distributed import DistributedDataParallel as DDP
+import torch.multiprocessing as mp
+# from parallel import DataParallelModel, DataParallelCriterion
 
 import torchtext
 from torchtext.data import Field, BucketIterator
@@ -34,6 +35,7 @@ import os.path
 import random
 import pickle
 import gzip
+import argparse
 
 import hyperparameters_pytorch as hparams
 import customutils_pytorch as utils
@@ -59,7 +61,8 @@ saved_train_pad_path = f'{os.getcwd()}/saved_train_pad.pickle'
 saved_valid_pad_path = f'{os.getcwd()}/saved_valid_pad.pickle'
 saved_test_pad_path = f'{os.getcwd()}/saved_test_pad.pickle'
 
-device = torch.device('cuda:1' if torch.cuda.is_available() else 'cpu')
+os.environ["CUDA_VISIBLE_DEVICES"] = "0,1"
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 spacy_en = spacy.load('en_core_web_sm')
 spacy_de = spacy.load('de_core_news_sm')
@@ -73,14 +76,14 @@ def tokenize_de(text):
     return [token.text for token in spacy_de.tokenizer(text)]
 
 '''load data'''
-
-SRC = Field(tokenize = tokenize_en,
+# tokenize = tokenize_en,
+SRC = Field(
             init_token='<sos>',
             eos_token='<eos>',
             lower=True,
             batch_first=True)
-
-TRG = Field(tokenize = tokenize_de,
+# tokenize = tokenize_de,
+TRG = Field(
             init_token='<sos>',
             eos_token='<eos>',
             lower=True,
@@ -116,10 +119,6 @@ et = utils.time.time()
 m, s = utils.epoch_time(st, et)
 print(f'data split completed | time : {m}m {s}s')
 sys.stdout.flush()
-
-# utils.save_pickle(train, 'train.pkl')
-# utils.save_pickle(valid, 'valid.pkl')
-# utils.save_pickle(test, 'test.pkl')
 
 st = utils.time.time()
 
@@ -191,48 +190,6 @@ by https://github.com/pytorch/text/issues/664
 '''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
 '''sort by length and pad sequences with similar lengths'''
 
-# class BySequenceLengthSampler(Sampler):
-#     def __init__(self, data_source, bucket_boundaries, batch_size=hparams.batch_size):
-#         ind_n_len = []
-#         for i, p in enumerate(data_source):
-#             ind_n_len.append((i, (p[0], p[1]))) # for length of src, trg
-#         self.ind_n_len = ind_n_len
-#         self.bucket_boundaries = bucket_boundaries
-#         self.batch_size = batch_size
-#
-#     def element_to_bucket_id(self, x, seq_lengh):
-#         boundaries = list(self.bucket_boundaries)
-#         buckets_min = [np.iinfo(np.int32).min] + boundaries
-#         buckets_max = boundaries + [np.iinfo(np.int32).max]
-#         conditions_c = np.logical_and(np.less_equal(buckets_min, seq_lengh),
-#                                       np.less(seq_lengh, buckets_max))
-#         bucket_id = np.min(np.where(conditions_c))
-#         return bucket_id
-#
-#     def __iter__(self):
-#         data_buckets = dict()
-#         for p, seq_len in self.ind_n_len:
-#             pid = self.element_to_bucket_id(p, seq_len)
-#             if pid in data_buckets.keys():
-#                 data_buckets[pid].append(p)
-#             else:
-#                 data_buckets[pid] = [p]
-#
-#         iter_list = []
-#         for k in data_buckets.keys():
-#             np.random.shuffle(data_buckets[k])
-#             iter_list += (np.array_split(data_buckets[k]
-#                                          , int(data_buckets[k][0] / self.batch_size)))
-#         random.shuffle(iter_list)  # shuffle all the batches so they arent ordered by bucket
-#         # size
-#         for i in iter_list:
-#             yield i.tolist()  # as it was stored in an array
-#
-# bucket_boundaries = [i for i in range(5,
-#                                       max([len(vars(train.examples[i])['src']) for i in range(len(train.examples))]+
-#                                           [len(vars(train.examples[i])['trg']) for i in range(len(train.examples))]),
-#                                       20)]
-
 train_ds = sorted([(len(each.src),
                     len(each.trg),
                     [SRC.vocab[i] for i in each.src],
@@ -275,37 +232,17 @@ def pad_data(data):
     return [(s,t) for s,t in zip(padded_src, padded_trg)]
     # return padded_src, padded_trg
 
-def chunker(data, batch_size):
-    result = []
-    for i in range(0, len(data), batch_size):
-       result += [pad_data(data[i:i+batch_size]) for i in range(i, i+batch_size)] 
-    return result
+# def chunker(data, batch_size):
+#     result = []
+#     for i in range(0, len(data), batch_size):
+#        result += [pad_data(data[i:i+batch_size]) for i in range(i, i+batch_size)]
+#     return result
 
 st = utils.time.time()
 
-if os.path.isfile(saved_train_pad_path):
-    with gzip.open(saved_train_pad_path, 'rb') as f:
-        train_ds = pickle.load(f)
-else:
-    train_ds = pad_data(train_ds)
-    with gzip.open(saved_train_pad_path, 'wb') as f:
-        pickle.dump(train_ds, f)
-
-if os.path.isfile(saved_valid_pad_path):
-    with gzip.open(saved_valid_pad_path, 'rb') as f:
-        valid_ds = pickle.load(f)
-else:
-    valid_ds = pad_data(valid_ds)
-    with gzip.open(saved_valid_pad_path, 'wb') as f:
-        pickle.dump(valid_ds, f)
-
-if os.path.isfile(saved_test_pad_path):
-    with gzip.open(saved_test_pad_path, 'rb') as f:
-        test_ds = pickle.load(f)
-else:
-    test_ds = pad_data(test_ds)
-    with gzip.open(saved_test_pad_path, 'wb') as f:
-        pickle.dump(test_ds, f)
+train_ds = pad_data(train_ds)
+valid_ds = pad_data(valid_ds)
+test_ds = pad_data(test_ds)
 
 et = utils.time.time()
 
@@ -314,15 +251,28 @@ print(f"data is ready | time : {m}m {s}s")
 sys.stdout.flush()
 
 # sampler = BySequenceLengthSampler(train_ds, bucket_boundaries, hparams.batch_size)
-train_loader = DataLoader(train_ds, batch_size=hparams.batch_size, num_workers=4, pin_memory=True)
-valid_loader = DataLoader(valid_ds, batch_size=hparams.batch_size, num_workers=4, pin_memory=True)
-test_loader = DataLoader(test_ds, batch_size=hparams.batch_size, num_workers=4, pin_memory=True)
+# train_loader = DataLoader(train_ds, batch_size=hparams.batch_size, num_workers=4, pin_memory=True)
+# valid_loader = DataLoader(valid_ds, batch_size=hparams.batch_size, num_workers=4, pin_memory=True)
+# test_loader = DataLoader(test_ds, batch_size=hparams.batch_size, num_workers=4, pin_memory=True)
 
 # example
 # for i, batch in enumerate(dataloader):
 #     src = batch[0]
 #     trg = batch[1]
 #     break
+
+'''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
+Multi-GPU
+'''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
+def setup(rank, world_size):
+    os.environ['MASTER_ADDR'] = 'localhost'
+    os.environ['MASTER_PORT'] = '12355'
+
+    # initialize the process group
+    dist.init_process_group("nccl", rank=rank, world_size=world_size)
+
+def cleanup():
+    dist.destroy_process_group()
 
 '''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
 embedding
@@ -382,22 +332,16 @@ def get_sinusoid_encoding_table(t_seq, d_model):
     sinusoid_table[:, 1::2] = np.cos(sinusoid_table[:, 1::2])
     return sinusoid_table
 
-# sinusoid_encoding_table = torch.FloatTensor(get_sinusoid_encoding_table(max_len_sentence, hparams.d_model)).to(device)
 class PositionalEncoding(nn.Module):
     def __init__(self, t_seq, d_model, device):
         super().__init__()
         self.device = device
-        self.sinusoid_table = torch.FloatTensor(get_sinusoid_encoding_table(t_seq, d_model)).to(0)
-        self.sinusoid_table2 = torch.FloatTensor(get_sinusoid_encoding_table(t_seq, d_model)).to(1)
+        self.sinusoid_table = torch.FloatTensor(get_sinusoid_encoding_table(t_seq, d_model)).to(self.device)
 
     def forward(self, x):
         x_len = x.shape[1]
-        loc = x.get_device()
         with torch.no_grad():
-            if loc == 0:
-                result = torch.add(x, self.sinusoid_table[:x_len, :])
-            elif loc == 1:
-                result = torch.add(x, self.sinusoid_table2[:x_len, :])
+            result = torch.add(x, self.sinusoid_table[:x_len, :])
         return result
 '''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
 Self Attention
@@ -780,38 +724,15 @@ OUTPUT_DIM = len(TRG.vocab.stoi)
 SRC_PAD_IDX = SRC.vocab.stoi[SRC.pad_token]
 TRG_PAD_IDX = TRG.vocab.stoi[TRG.pad_token]
 
-enc = TransformerEncoder(input_dim=INPUT_DIM,
-                         d_k=hparams.d_k,
-                         d_v=hparams.d_v,
-                         d_model=hparams.d_model,
-                         n_layers=hparams.n_decoder,
-                         n_heads=hparams.n_heads,
-                         d_ff=hparams.d_ff,
-                         dropout_ratio=hparams.dropout_ratio,
-                         device=device).to(device)
+def load_init_model(model, model_filepath, device):
+    if os.path.isfile(model_filepath):
+        model.load_state_dict(torch.load(model_filepath, map_location=device))
+        print('model loaded from saved file')
+        sys.stdout.flush()
+    else:
+        model.apply(utils.initalize_weights)
 
-dec = TransformerDecoder(output_dim=OUTPUT_DIM,
-                         d_k=hparams.d_k,
-                         d_v=hparams.d_v,
-                         d_model=hparams.d_model,
-                         n_layers=hparams.n_decoder,
-                         n_heads=hparams.n_heads,
-                         d_ff=hparams.d_ff,
-                         dropout_ratio=hparams.dropout_ratio,
-                         device=device).to(device)
-
-model = Transformer(encoder=enc,
-                    decoder=dec,
-                    src_pad_idx=SRC_PAD_IDX,
-                    trg_pad_idx=TRG_PAD_IDX,
-                    device=device).to(device)
-
-if os.path.isfile(model_filepath):
-    model.load_state_dict(torch.load(model_filepath, map_location=device))
-    print('model loaded from saved file')
-    sys.stdout.flush()
-else:
-    model.apply(utils.initalize_weights)
+# load_init_model(model, model_filepath, device)
 
 print(f'The model has {utils.count_parameters(model):,} trainable parameters')
 sys.stdout.flush()
@@ -825,7 +746,7 @@ scheduler = optim.lr_scheduler.LambdaLR(optimizer=optimizer,
                                         verbose=False)
 
 # loss_fn = nn.CrossEntropyLoss(ignore_index=TRG_PAD_IDX)
-loss_fn = LabelSmoothingLoss(smoothing=hparams.label_smoothing, classes=len(TRG.vocab.stoi), ignore_index=TRG_PAD_IDX)
+# loss_fn = LabelSmoothingLoss(smoothing=hparams.label_smoothing, classes=len(TRG.vocab.stoi), ignore_index=TRG_PAD_IDX)
 
 # parallel_model = DataParallelModel(model, device_ids=[0,1])
 # parallel_model.to(device)
@@ -878,7 +799,7 @@ def train_model(model, iterator, optimizer, loss_fn, epoch_num, iter_part=150):
         # trg: [batch_size*trg_len-1]
 
         # loss = loss_fn(output, trg)
-        loss = loss_fn(noutput, trg)
+        loss = loss_fn(output, trg)
         loss.backward()
 
         '''graident clipping'''
@@ -1001,42 +922,100 @@ def translate_sentence(sentence, SRC, TRG, model, device, max_len=50, logging=Fa
 '''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
 Training
 '''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
-for epoch in range(hparams.n_epochs):
-    start_time = utils.time.time()
-    train_loss = train_model(model, train_loader, optimizer, parallel_loss, epoch)
-    valid_loss = evaluate_model(model, valid_loader, parallel_loss)
-    end_time = utils.time.time()
-    epoch_mins, epoch_secs = utils.epoch_time(start_time, end_time)
+def train(rank, world_size):
 
-    if valid_loss < best_valid_loss:
-        best_valid_loss = valid_loss
-        torch.save(model.state_dict(), '{model_name}.pt')
-        print('model saved')
-    print('---------------------------------------------------------')
-    print(f'Epoch: {epoch+1:03} Time: {epoch_mins}m {epoch_secs}s')
-    print(f'Train Loss: {train_loss:.3f} Train PPL: {utils.math.exp(train_loss):.3f}')
-    print(f'Validation Loss: {valid_loss:.3f} Validation PPL: {utils.math.exp(valid_loss):.3f}')
-    show_bleu(test, SRC, TRG, model, device)
-    print('---------------------------------------------------------')
-    print('\n')
-    sys.stdout.flush()
+    '''''''''''''''set up'''''''''''''''
+    print(f"Running basic DDP example on rank {rank}.")
+    setup(rank, world_size)
+    ''''''''''''''''''''''''''''''''''''
+
+    sampler_train = DistributedSampler(train_ds, num_replicas=world_size, rank=rank)
+    sampler_valid = DistributedSampler(valid_ds, num_replicas=world_size, rank=rank)
+    sampler_test = DistributedSampler(test_ds, num_replicas=world_size, rank=rank)
+
+    train_loader = DataLoader(train_ds, batch_size=hparams.batch_size, num_workers=1, sampler=sampler_train, pin_memory=True)
+    valid_loader = DataLoader(valid_ds, batch_size=hparams.batch_size, num_workers=1, sampler=sampler_valid, pin_memory=True)
+    test_loader = DataLoader(test_ds, batch_size=hparams.batch_size, num_workers=1, sampler=sampler_test, pin_memory=True)
+
+    enc = TransformerEncoder(input_dim=INPUT_DIM,
+                             d_k=hparams.d_k,
+                             d_v=hparams.d_v,
+                             d_model=hparams.d_model,
+                             n_layers=hparams.n_decoder,
+                             n_heads=hparams.n_heads,
+                             d_ff=hparams.d_ff,
+                             dropout_ratio=hparams.dropout_ratio,
+                             device=device).to(device)
+
+    dec = TransformerDecoder(output_dim=OUTPUT_DIM,
+                             d_k=hparams.d_k,
+                             d_v=hparams.d_v,
+                             d_model=hparams.d_model,
+                             n_layers=hparams.n_decoder,
+                             n_heads=hparams.n_heads,
+                             d_ff=hparams.d_ff,
+                             dropout_ratio=hparams.dropout_ratio,
+                             device=device).to(device)
+
+    model = Transformer(encoder=enc,
+                        decoder=dec,
+                        src_pad_idx=SRC_PAD_IDX,
+                        trg_pad_idx=TRG_PAD_IDX,
+                        device=device)
+
+    model.to(rank)
+    load_init_model(model, model_filepath, rank)
+    model = DDP(model, device_ids=[rank])
+    loss_fn = LabelSmoothingLoss(smoothing=hparams.label_smoothing, classes=len(TRG.vocab.stoi),
+                                 ignore_index=TRG_PAD_IDX)
+
+    for epoch in range(hparams.n_epochs):
+        start_time = utils.time.time()
+        train_loss = train_model(model, train_loader, optimizer, loss_fn, epoch)
+        valid_loss = evaluate_model(model, valid_loader, parallel_loss)
+        end_time = utils.time.time()
+        epoch_mins, epoch_secs = utils.epoch_time(start_time, end_time)
+
+        if valid_loss < best_valid_loss:
+            best_valid_loss = valid_loss
+            torch.save(model.state_dict(), '{model_name}.pt')
+            print('model saved')
+        print('---------------------------------------------------------')
+        print(f'Epoch: {epoch+1:03} Time: {epoch_mins}m {epoch_secs}s')
+        print(f'Train Loss: {train_loss:.3f} Train PPL: {utils.math.exp(train_loss):.3f}')
+        print(f'Validation Loss: {valid_loss:.3f} Validation PPL: {utils.math.exp(valid_loss):.3f}')
+        show_bleu(test, SRC, TRG, model, device)
+        print('---------------------------------------------------------')
+        print('\n')
+        sys.stdout.flush()
+
+    cleanup()
+
+def main(world_size):
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--gpus', default=1, type=int, help='number of gpus per node')
+    args = parser.parse_args()
+    world_size = args.gpus
+    mp.spawn(train, args=(world_size,), nprocs=world_size, join=True)
 
 '''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
 Generation Test
 '''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
-example_idx=10
-src = vars(test.examples[example_idx])['src']
-trg = vars(test.examples[example_idx])['trg']
-print('generation:')
-print(f'src : {src}')
-print(f'trg : {trg}')
-translation, attention = translate_sentence(sentence=src,
-                                            SRC=SRC,
-                                            TRG=TRG,
-                                            model=model,
-                                            device=device)
-print('result :', ' '.join(translation))
+def inference():
+    example_idx=10
+    src = vars(test.examples[example_idx])['src']
+    trg = vars(test.examples[example_idx])['trg']
+    print('generation:')
+    print(f'src : {src}')
+    print(f'trg : {trg}')
+    translation, attention = translate_sentence(sentence=src,
+                                                SRC=SRC,
+                                                TRG=TRG,
+                                                model=model,
+                                                device=device)
+    print('result :', ' '.join(translation))
 
+    show_bleu(test, SRC, TRG, model, device)
 
-
-show_bleu(test, SRC, TRG, model, device)
+if __name__ == '__main__':
+    main(2)
