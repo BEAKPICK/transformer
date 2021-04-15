@@ -17,6 +17,7 @@ import torch.nn as nn
 from torch.utils.data import DataLoader, BatchSampler, RandomSampler, Sampler, DistributedSampler
 
 from torch.nn.parallel.distributed import DistributedDataParallel as DDP
+import torch.distributed as dist
 import torch.multiprocessing as mp
 # from parallel import DataParallelModel, DataParallelCriterion
 
@@ -49,7 +50,7 @@ preparing data and environment
 sample_valid_size = 300
 sample_test_size = 50
 
-model_name = 'transformer_en_de_gl_3'
+model_name = 'transformer_en_de_gl_multigpu'
 model_filepath = f'{os.getcwd()}/{model_name}.pt'
 vocab_filepath = f'{os.getcwd()}/.data/wmt14/vocab.bpe.32000'
 
@@ -76,14 +77,14 @@ def tokenize_de(text):
     return [token.text for token in spacy_de.tokenizer(text)]
 
 '''load data'''
-# tokenize = tokenize_en,
-SRC = Field(
+
+SRC = Field(tokenize = tokenize_en,
             init_token='<sos>',
             eos_token='<eos>',
             lower=True,
             batch_first=True)
-# tokenize = tokenize_de,
-TRG = Field(
+
+TRG = Field(tokenize = tokenize_de,
             init_token='<sos>',
             eos_token='<eos>',
             lower=True,
@@ -726,24 +727,26 @@ TRG_PAD_IDX = TRG.vocab.stoi[TRG.pad_token]
 
 def load_init_model(model, model_filepath, device):
     if os.path.isfile(model_filepath):
-        model.load_state_dict(torch.load(model_filepath, map_location=device))
+        model.load_state_dict(torch.load(model_filepath, map_location=device), strict=False)
         print('model loaded from saved file')
         sys.stdout.flush()
     else:
         model.apply(utils.initalize_weights)
+    print(f'The model has {utils.count_parameters(model):,} trainable parameters')
+    sys.stdout.flush()
 
 # load_init_model(model, model_filepath, device)
 
-print(f'The model has {utils.count_parameters(model):,} trainable parameters')
-sys.stdout.flush()
+# print(f'The model has {utils.count_parameters(model):,} trainable parameters')
+# sys.stdout.flush()
 
 '''set optimizer, scheduler and loss function'''
-optimizer = torch.optim.Adam(model.parameters(), betas=(0.9, 0.98), eps=1e-09, lr=hparams.learning_rate)
-warmup_steps = 4000
-scheduler = optim.lr_scheduler.LambdaLR(optimizer=optimizer,
-                                        lr_lambda=lambda steps:(hparams.d_model**(-0.5))*min((steps+1)**(-0.5), (steps+1)*warmup_steps**(-1.5)),
-                                        last_epoch=-1,
-                                        verbose=False)
+# optimizer = torch.optim.Adam(model.parameters(), betas=(0.9, 0.98), eps=1e-09, lr=hparams.learning_rate)
+# warmup_steps = 4000
+# scheduler = optim.lr_scheduler.LambdaLR(optimizer=optimizer,
+#                                         lr_lambda=lambda steps:(hparams.d_model**(-0.5))*min((steps+1)**(-0.5), (steps+1)*warmup_steps**(-1.5)),
+#                                         last_epoch=-1,
+#                                         verbose=False)
 
 # loss_fn = nn.CrossEntropyLoss(ignore_index=TRG_PAD_IDX)
 # loss_fn = LabelSmoothingLoss(smoothing=hparams.label_smoothing, classes=len(TRG.vocab.stoi), ignore_index=TRG_PAD_IDX)
@@ -759,7 +762,7 @@ best_valid_loss = float('inf')
 since working enviornment takes too long to complete 1 epoch, make frequent log and save model
 logged after (iter_part * batch_size) are completed
 '''
-def train_model(model, iterator, optimizer, loss_fn, epoch_num, iter_part=150):
+def train_model(model, iterator, optimizer, scheduler, loss_fn, epoch, iter_part=150):
 
     global best_valid_loss
     total_length = len(train.examples)
@@ -814,27 +817,33 @@ def train_model(model, iterator, optimizer, loss_fn, epoch_num, iter_part=150):
 
         '''part log part'''
         if (i+1) % iter_part == 0:
-            print(f'{total_length if (i+1)*hparams.batch_size > total_length else (i+1)*hparams.batch_size} / {total_length}, part {current_part} / {total_parts} complete...')
-            part_end_time = utils.time.time()
-            part_mins, part_secs = utils.epoch_time(part_start_time, part_end_time)
-            print(f'Part Train Loss: {epoch_loss / (i+1):.3f} | Part Train PPL: {utils.math.exp(epoch_loss / (i+1)):.3f} | Time : {part_mins}m {part_secs}s')
-            sys.stdout.flush()
-            valid_loss = evaluate_model(model, valid_loader, loss_fn)
-            print(f'Validation Loss: {valid_loss:.3f} | Validation PPL: {utils.math.exp(valid_loss):.3f}')
-            if valid_loss < best_valid_loss:
-                best_valid_loss = valid_loss
-                torch.save(model.state_dict(), f'{model_name}.pt')
-                print(f'model saved at {model_name}')
-            # show_bleu(test, SRC, TRG, model, device) '''show_bleu is too slow'''
-            part_end_time = utils.time.time()
-            part_mins, part_secs = utils.epoch_time(part_start_time, part_end_time)
-            print(f'{part_mins}m {part_secs}s')
-            current_part += 1
-            sys.stdout.flush()
-            model.train()
-            part_start_time = utils.time.time()
+            dist.all_reduce(epoch_loss, op=dist.ReduceOp.SUM)
+            dist.all_reduce(i, op=dist.ReduceOp.SUM)
+            if rank == 0:
+                print(f'Epoch:{epoch+1:03}, {total_length if (i+1)*hparams.batch_size > total_length else (i+1)*hparams.batch_size} / {total_length}, part {current_part} / {total_parts} complete...')
+                part_end_time = utils.time.time()
+                part_mins, part_secs = utils.epoch_time(part_start_time, part_end_time)
+                print(f'Part Train Loss: {epoch_loss / (i+1):.3f} | Part Train PPL: {utils.math.exp(epoch_loss / (i+1)):.3f} | Time : {part_mins}m {part_secs}s')
+                sys.stdout.flush()
+                valid_loss, len_loss = evaluate_model(model, valid_loader, loss_fn)
+                dist.all_reduce(valid_loss, op=dist.ReduceOp.SUM)
+                dist.all_reduce(len_loss, op=dist.ReduceOp.SUM)
+                valid_loss = valid_loss / len_loss
+                print(f'Validation Loss: {valid_loss:.3f} | Validation PPL: {utils.math.exp(valid_loss):.3f}')
+                if valid_loss < best_valid_loss:
+                    best_valid_loss = valid_loss
+                    torch.save(model.state_dict(), f'{model_name}.pt')
+                    print(f'model saved at {model_name}')
+                # show_bleu(test, SRC, TRG, model, device) '''show_bleu is too slow'''
+                part_end_time = utils.time.time()
+                part_mins, part_secs = utils.epoch_time(part_start_time, part_end_time)
+                print(f'{part_mins}m {part_secs}s')
+                current_part += 1
+                sys.stdout.flush()
+                model.train()
+                part_start_time = utils.time.time()
         del loss
-    return epoch_loss / len(iterator)
+    return epoch_loss, len(iterator)
 
 '''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
 Evaluation
@@ -868,7 +877,7 @@ def evaluate_model(model, iterator, loss_fn):
             '''total loss in each epochs'''
             epoch_loss += float(loss.item())
 
-    return epoch_loss / len(iterator)
+    return epoch_loss, len(iterator)
 
 '''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
 Generation
@@ -922,7 +931,7 @@ def translate_sentence(sentence, SRC, TRG, model, device, max_len=50, logging=Fa
 '''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
 Training
 '''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
-def train(rank, world_size):
+def train_fn(rank, world_size):
 
     '''''''''''''''set up'''''''''''''''
     print(f"Running basic DDP example on rank {rank}.")
@@ -931,11 +940,11 @@ def train(rank, world_size):
 
     sampler_train = DistributedSampler(train_ds, num_replicas=world_size, rank=rank)
     sampler_valid = DistributedSampler(valid_ds, num_replicas=world_size, rank=rank)
-    sampler_test = DistributedSampler(test_ds, num_replicas=world_size, rank=rank)
+    # sampler_test = DistributedSampler(test_ds, num_replicas=world_size, rank=rank)
 
     train_loader = DataLoader(train_ds, batch_size=hparams.batch_size, num_workers=1, sampler=sampler_train, pin_memory=True)
     valid_loader = DataLoader(valid_ds, batch_size=hparams.batch_size, num_workers=1, sampler=sampler_valid, pin_memory=True)
-    test_loader = DataLoader(test_ds, batch_size=hparams.batch_size, num_workers=1, sampler=sampler_test, pin_memory=True)
+    # test_loader = DataLoader(test_ds, batch_size=hparams.batch_size, num_workers=1, sampler=sampler_test, pin_memory=True)
 
     enc = TransformerEncoder(input_dim=INPUT_DIM,
                              d_k=hparams.d_k,
@@ -966,13 +975,33 @@ def train(rank, world_size):
     model.to(rank)
     load_init_model(model, model_filepath, rank)
     model = DDP(model, device_ids=[rank])
+
+    warmup_steps = 4000
+    optimizer = torch.optim.Adam(model.parameters(), betas=(0.9, 0.98), eps=1e-09, lr=hparams.learning_rate)
+    scheduler = optim.lr_scheduler.LambdaLR(optimizer=optimizer,
+                                            lr_lambda=lambda steps:(hparams.d_model**(-0.5))*min((steps+1)**(-0.5), (steps+1)*warmup_steps**(-1.5)),
+                                            last_epoch=-1,
+                                            verbose=False)
     loss_fn = LabelSmoothingLoss(smoothing=hparams.label_smoothing, classes=len(TRG.vocab.stoi),
-                                 ignore_index=TRG_PAD_IDX)
+                                 ignore_index=TRG_PAD_IDX).to(rank)
 
     for epoch in range(hparams.n_epochs):
         start_time = utils.time.time()
-        train_loss = train_model(model, train_loader, optimizer, loss_fn, epoch)
-        valid_loss = evaluate_model(model, valid_loader, parallel_loss)
+
+        train_loss, len_train_loss = train_model(model, train_loader, optimizer, scheduler, loss_fn, epoch)
+
+        dist.all_reduce(train_loss, op=dist.ReduceOp.SUM)
+        dist.all_reduce(len_train_loss, op=dist.ReduceOp.SUM)
+
+        train_loss = train_loss / len_train_loss
+
+        valid_loss, len_valid_loss = evaluate_model(model, valid_loader, loss_fn)
+
+        dist.all_reduce(valid_loss, op=dist.ReduceOp.SUM)
+        dist.all_reduce(len_valid_loss, op=dist.ReduceOp.SUM)
+
+        valid_loss = valid_loss / len_valid_loss
+
         end_time = utils.time.time()
         epoch_mins, epoch_secs = utils.epoch_time(start_time, end_time)
 
@@ -991,12 +1020,12 @@ def train(rank, world_size):
 
     cleanup()
 
-def main(world_size):
+def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--gpus', default=1, type=int, help='number of gpus per node')
     args = parser.parse_args()
     world_size = args.gpus
-    mp.spawn(train, args=(world_size,), nprocs=world_size, join=True)
+    mp.spawn(train_fn, args=(world_size,), nprocs=world_size, join=True)
 
 '''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
 Generation Test
@@ -1018,4 +1047,4 @@ def inference():
     show_bleu(test, SRC, TRG, model, device)
 
 if __name__ == '__main__':
-    main(2)
+    main()
