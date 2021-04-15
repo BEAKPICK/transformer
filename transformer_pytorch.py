@@ -16,8 +16,10 @@ import torch.optim as optim
 import torch.nn as nn
 from torch.utils.data import DataLoader, BatchSampler, RandomSampler, Sampler
 
-from torch.nn.parallel.distributed import DistributedDataParallel
-from parallel import DataParallelModel, DataParallelCriterion
+import pytorch_lightning as pl
+from pytorch_lightning.callbacks import LearningRateMonitor, Callback
+# from torch.nn.parallel.distributed import DistributedDataParallel
+# from parallel import DataParallelModel, DataParallelCriterion
 
 import torchtext
 from torchtext.data import Field, BucketIterator
@@ -65,6 +67,7 @@ spacy_en = spacy.load('en_core_web_sm')
 spacy_de = spacy.load('de_core_news_sm')
 
 share_vocab = True
+pretrained_embed = None
 
 def tokenize_en(text):
     return [token.text for token in spacy_en.tokenizer(text)]
@@ -116,10 +119,6 @@ et = utils.time.time()
 m, s = utils.epoch_time(st, et)
 print(f'data split completed | time : {m}m {s}s')
 sys.stdout.flush()
-
-# utils.save_pickle(train, 'train.pkl')
-# utils.save_pickle(valid, 'valid.pkl')
-# utils.save_pickle(test, 'test.pkl')
 
 st = utils.time.time()
 
@@ -189,50 +188,6 @@ since BucketIterator is too slow (low GPU, high CPU),
 encouraged to use torch.utils.data.DataLoader
 by https://github.com/pytorch/text/issues/664
 '''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
-'''sort by length and pad sequences with similar lengths'''
-
-# class BySequenceLengthSampler(Sampler):
-#     def __init__(self, data_source, bucket_boundaries, batch_size=hparams.batch_size):
-#         ind_n_len = []
-#         for i, p in enumerate(data_source):
-#             ind_n_len.append((i, (p[0], p[1]))) # for length of src, trg
-#         self.ind_n_len = ind_n_len
-#         self.bucket_boundaries = bucket_boundaries
-#         self.batch_size = batch_size
-#
-#     def element_to_bucket_id(self, x, seq_lengh):
-#         boundaries = list(self.bucket_boundaries)
-#         buckets_min = [np.iinfo(np.int32).min] + boundaries
-#         buckets_max = boundaries + [np.iinfo(np.int32).max]
-#         conditions_c = np.logical_and(np.less_equal(buckets_min, seq_lengh),
-#                                       np.less(seq_lengh, buckets_max))
-#         bucket_id = np.min(np.where(conditions_c))
-#         return bucket_id
-#
-#     def __iter__(self):
-#         data_buckets = dict()
-#         for p, seq_len in self.ind_n_len:
-#             pid = self.element_to_bucket_id(p, seq_len)
-#             if pid in data_buckets.keys():
-#                 data_buckets[pid].append(p)
-#             else:
-#                 data_buckets[pid] = [p]
-#
-#         iter_list = []
-#         for k in data_buckets.keys():
-#             np.random.shuffle(data_buckets[k])
-#             iter_list += (np.array_split(data_buckets[k]
-#                                          , int(data_buckets[k][0] / self.batch_size)))
-#         random.shuffle(iter_list)  # shuffle all the batches so they arent ordered by bucket
-#         # size
-#         for i in iter_list:
-#             yield i.tolist()  # as it was stored in an array
-#
-# bucket_boundaries = [i for i in range(5,
-#                                       max([len(vars(train.examples[i])['src']) for i in range(len(train.examples))]+
-#                                           [len(vars(train.examples[i])['trg']) for i in range(len(train.examples))]),
-#                                       20)]
-
 train_ds = sorted([(len(each.src),
                     len(each.trg),
                     [SRC.vocab[i] for i in each.src],
@@ -313,7 +268,6 @@ m, s = utils.epoch_time(st, et)
 print(f"data is ready | time : {m}m {s}s")
 sys.stdout.flush()
 
-# sampler = BySequenceLengthSampler(train_ds, bucket_boundaries, hparams.batch_size)
 train_loader = DataLoader(train_ds, batch_size=hparams.batch_size, num_workers=4, pin_memory=True)
 valid_loader = DataLoader(valid_ds, batch_size=hparams.batch_size, num_workers=4, pin_memory=True)
 test_loader = DataLoader(test_ds, batch_size=hparams.batch_size, num_workers=4, pin_memory=True)
@@ -327,45 +281,57 @@ test_loader = DataLoader(test_ds, batch_size=hparams.batch_size, num_workers=4, 
 '''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
 embedding
 '''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
-src_vocabsize = len(SRC.vocab.stoi)
-trg_vocabsize = len(TRG.vocab.stoi)
+class PretrainedEmbedding(pl.LightningModule):
+    def __init__(self):
+        global pretrained_embed
 
-src_embed_mtrx = torch.randn(src_vocabsize, hparams.d_model).to(device)
-trg_embed_mtrx = torch.randn(trg_vocabsize, hparams.d_model).to(device)
+        if pretrained_embed is not None:
+            self.src_embed_mtrx = pretrained_embed.src.embed_mtrx
+            self.trg_embed_mtrx = pretrained_embed.trg.embed_mtrx
+            return
 
-'''
-for word2vec
-'''
-# src_word2vec = Word2Vec.load('src_embedd.model')
-# trg_word2vec = Word2Vec.load('trg_embedd.model')
+        src_vocabsize = len(SRC.vocab.stoi)
+        trg_vocabsize = len(TRG.vocab.stoi)
 
-# for i in range(src_vocabsize):
-#     word = list(SRC.vocab.stoi.keys())[i]
-#     if word in src_word2vec.wv.index2word:
-#         src_embed_mtrx[SRC.vocab.stoi[word]] = torch.tensor(src_word2vec.wv[word].copy()).to(device)
-#
-# for i in range(trg_vocabsize):
-#     word = list(TRG.vocab.stoi.keys())[i]
-#     if word in trg_word2vec.wv.index2word:
-#         trg_embed_mtrx[TRG.vocab.stoi[word]] = torch.tensor(trg_word2vec.wv[word].copy()).to(device)
+        self.src_embed_mtrx = torch.randn(src_vocabsize, hparams.d_model)
+        self.trg_embed_mtrx = torch.randn(trg_vocabsize, hparams.d_model)
 
-'''
-for glove
-'''
-glove = Glove()
-src_glove = glove.load('src_glove.model')
-trg_glove = glove.load('trg_glove.model')
+        '''
+        for word2vec
+        '''
+        # src_word2vec = Word2Vec.load('src_embedd.model')
+        # trg_word2vec = Word2Vec.load('trg_embedd.model')
 
-for word in list(SRC.vocab.stoi.keys()):
-    if word in src_glove.dictionary:
-        src_embed_mtrx[SRC.vocab.stoi[word]] = torch.tensor(src_glove.word_vectors[src_glove.dictionary[word]].copy()).to(device)
+        # for i in range(src_vocabsize):
+        #     word = list(SRC.vocab.stoi.keys())[i]
+        #     if word in src_word2vec.wv.index2word:
+        #         src_embed_mtrx[SRC.vocab.stoi[word]] = torch.tensor(src_word2vec.wv[word].copy()).to(device)
+        #
+        # for i in range(trg_vocabsize):
+        #     word = list(TRG.vocab.stoi.keys())[i]
+        #     if word in trg_word2vec.wv.index2word:
+        #         trg_embed_mtrx[TRG.vocab.stoi[word]] = torch.tensor(trg_word2vec.wv[word].copy()).to(device)
 
-for word in list(TRG.vocab.stoi.keys()):
-    if word in trg_glove.dictionary:
-        trg_embed_mtrx[SRC.vocab.stoi[word]] = torch.tensor(trg_glove.word_vectors[trg_glove.dictionary[word]].copy()).to(device)
+        '''
+        for glove
+        '''
+        glove = Glove()
+        src_glove = glove.load('src_glove.model')
+        trg_glove = glove.load('trg_glove.model')
 
-print("pretrained word embeddings loaded")
-sys.stdout.flush()
+        for word in list(SRC.vocab.stoi.keys()):
+            if word in src_glove.dictionary:
+                self.src_embed_mtrx[SRC.vocab.stoi[word]] = torch.tensor(src_glove.word_vectors[src_glove.dictionary[word]].copy()).to(device)
+
+        for word in list(TRG.vocab.stoi.keys()):
+            if word in trg_glove.dictionary:
+                self.trg_embed_mtrx[SRC.vocab.stoi[word]] = torch.tensor(trg_glove.word_vectors[trg_glove.dictionary[word]].copy()).to(device)
+
+        pretrained_embed = self
+
+        print("pretrained word embeddings loaded")
+        sys.stdout.flush()
+
 
 '''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
 positional encoding
@@ -383,29 +349,22 @@ def get_sinusoid_encoding_table(t_seq, d_model):
     return sinusoid_table
 
 # sinusoid_encoding_table = torch.FloatTensor(get_sinusoid_encoding_table(max_len_sentence, hparams.d_model)).to(device)
-class PositionalEncoding(nn.Module):
-    def __init__(self, t_seq, d_model, device):
+class PositionalEncoding(pl.LightningModule):
+    def __init__(self, t_seq, d_model):
         super().__init__()
-        self.device = device
-        self.sinusoid_table = torch.FloatTensor(get_sinusoid_encoding_table(t_seq, d_model)).to(0)
-        self.sinusoid_table2 = torch.FloatTensor(get_sinusoid_encoding_table(t_seq, d_model)).to(1)
+        self.sinusoid_table = torch.FloatTensor(get_sinusoid_encoding_table(t_seq, d_model))
 
     def forward(self, x):
         x_len = x.shape[1]
-        loc = x.get_device()
         with torch.no_grad():
-            if loc == 0:
-                result = torch.add(x, self.sinusoid_table[:x_len, :])
-            elif loc == 1:
-                result = torch.add(x, self.sinusoid_table2[:x_len, :])
+            result = torch.add(x, self.sinusoid_table[:x_len, :])
         return result
 '''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
 Self Attention
 '''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
-class MultiHeadAttentionLayer(nn.Module):
-    def __init__(self, d_k, d_v, d_model, n_heads, dropout_ratio, device):
+class MultiHeadAttentionLayer(pl.LightningModule):
+    def __init__(self, d_k, d_v, d_model, n_heads, dropout_ratio):
         super().__init__()
-        self.device = device
         # since d_v * n_heads = d_model in the paper,
         assert d_model % n_heads == 0
 
@@ -414,14 +373,14 @@ class MultiHeadAttentionLayer(nn.Module):
         self.d_model = d_model
         self.n_heads = n_heads
 
-        self.w_q = nn.Linear(d_model, d_k * n_heads).to(self.device)
-        self.w_k = nn.Linear(d_model, d_k * n_heads).to(self.device)
-        self.w_v = nn.Linear(d_model, d_v * n_heads).to(self.device)
+        self.w_q = nn.Linear(d_model, d_k * n_heads)
+        self.w_k = nn.Linear(d_model, d_k * n_heads)
+        self.w_v = nn.Linear(d_model, d_v * n_heads)
 
-        self.w_o = nn.Linear(d_v * n_heads, d_model).to(self.device)
+        self.w_o = nn.Linear(d_v * n_heads, d_model)
 
-        self.dropout = nn.Dropout(dropout_ratio).to(self.device)
-        self.scale = torch.sqrt(torch.FloatTensor([self.d_k])).to(self.device)
+        self.dropout = nn.Dropout(dropout_ratio)
+        self.scale = torch.sqrt(torch.FloatTensor([self.d_k]))
 
     def forward(self, query, key, value, mask=None):
         batch_size = query.shape[0]
@@ -454,7 +413,7 @@ class MultiHeadAttentionLayer(nn.Module):
         # x: [batch_size, query_len, d_model]
         return x, similarity_norm
 
-class PositionwiseFeedforwardLayer(nn.Module):
+class PositionwiseFeedforwardLayer(pl.LightningModule):
     def __init__(self, d_model, d_ff, dropout_ratio):
         super().__init__()
 
@@ -474,22 +433,21 @@ class PositionwiseFeedforwardLayer(nn.Module):
 '''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
 TransformerEncoderLayer
 '''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
-class TransformerEncoderLayer(nn.Module):
-    def __init__(self, d_k, d_v, d_model, n_heads, d_ff, dropout_ratio, device):
+class TransformerEncoderLayer(pl.LightningModule):
+    def __init__(self, d_k, d_v, d_model, n_heads, d_ff, dropout_ratio):
         super().__init__()
 
         self.self_attn_layer = MultiHeadAttentionLayer(d_k=d_k,
                                                        d_v=d_v,
                                                        d_model=d_model,
                                                        n_heads=n_heads,
-                                                       dropout_ratio=dropout_ratio,
-                                                       device=device).to(device)
-        self.self_attn_layer_norm = nn.LayerNorm(d_model).to(device)
+                                                       dropout_ratio=dropout_ratio)
+        self.self_attn_layer_norm = nn.LayerNorm(d_model)
         self.positionwise_ff_layer = PositionwiseFeedforwardLayer(d_model=d_model,
                                                                   d_ff=d_ff,
-                                                                  dropout_ratio=dropout_ratio).to(device)
-        self.positionwise_ff_layer_norm = nn.LayerNorm(d_model).to(device)
-        self.dropout = nn.Dropout(dropout_ratio).to(device)
+                                                                  dropout_ratio=dropout_ratio)
+        self.positionwise_ff_layer_norm = nn.LayerNorm(d_model)
+        self.dropout = nn.Dropout(dropout_ratio)
 
     def forward(self, src, src_mask):
 
@@ -507,23 +465,21 @@ class TransformerEncoderLayer(nn.Module):
 '''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
 TransformerEncoder
 '''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
-class TransformerEncoder(nn.Module):
+class TransformerEncoder(pl.LightningModule):
     def __init__(self, input_dim, d_k, d_v, d_model, n_layers, n_heads, d_ff, dropout_ratio, device, max_length=100):
         super().__init__()
 
-        self.device = device
-
-        self.tok_embedding = nn.Embedding(input_dim, d_model).from_pretrained(src_embed_mtrx).requires_grad_(False).to(self.device)
-        self.positional_encoding = PositionalEncoding(max_len_sentence, hparams.d_model, self.device)
+        self.pretained_embedding = PretrainedEmbedding()
+        self.tok_embedding = nn.Embedding(input_dim, d_model).from_pretrained(self.pretained_embedding.src_embed_mtrx).requires_grad_(False)
+        self.positional_encoding = PositionalEncoding(max_len_sentence, hparams.d_model)
         self.layers = nn.ModuleList([TransformerEncoderLayer(d_k=d_k,
                                                              d_v=d_v,
                                                              d_model=d_model,
                                                              n_heads=n_heads,
                                                              d_ff=d_ff,
-                                                             dropout_ratio=dropout_ratio,
-                                                             device=device) for _ in range(n_layers)]).to(self.device)
-        self.dropout = nn.Dropout(dropout_ratio).to(self.device)
-        self.scale = torch.sqrt(torch.FloatTensor([d_k])).to(self.device)
+                                                             dropout_ratio=dropout_ratio) for _ in range(n_layers)])
+        self.dropout = nn.Dropout(dropout_ratio)
+        self.scale = torch.sqrt(torch.FloatTensor([d_k]))
 
     def forward(self, src, src_mask):
         batch_size =src.shape[0]
@@ -535,7 +491,7 @@ class TransformerEncoder(nn.Module):
         src = self.dropout(self.tok_embedding(src))
         # pe = get_sinusoid_encoding_table(src_len, src.shape[2], self.device)
         # +positional encoding
-        src = self.positional_encoding(src).to(self.device)
+        src = self.positional_encoding(src)
         # del pe
         # src: [batch_size, src_len, d_model]
         for layer in self.layers:
@@ -546,34 +502,32 @@ class TransformerEncoder(nn.Module):
 '''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
 TransformerDecoderLayer
 '''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
-class TransformerDecoderLayer(nn.Module):
-    def __init__(self, d_k, d_v, d_model, n_heads, d_ff, dropout_ratio, device):
+class TransformerDecoderLayer(pl.LightningModule):
+    def __init__(self, d_k, d_v, d_model, n_heads, d_ff, dropout_ratio):
         super().__init__()
-        self.device = device
         self.self_attn_layer = MultiHeadAttentionLayer(d_k=d_k,
                                                        d_v=d_v,
                                                        d_model=d_model,
                                                        n_heads=n_heads,
-                                                       dropout_ratio=dropout_ratio,
-                                                       device=device).to(self.device)
+                                                       dropout_ratio=dropout_ratio)
 
-        self.self_attn_layer_norm = nn.LayerNorm(d_model).to(self.device)
+        self.self_attn_layer_norm = nn.LayerNorm(d_model)
 
         self.enc_dec_attn_layer = MultiHeadAttentionLayer(d_k=d_k,
                                                           d_v=d_v,
                                                           d_model=d_model,
                                                           n_heads=n_heads,
                                                           dropout_ratio=dropout_ratio,
-                                                          device=device).to(self.device)
+                                                          device=device)
 
-        self.enc_dec_attn_layer_norm = nn.LayerNorm(d_model).to(self.device)
+        self.enc_dec_attn_layer_norm = nn.LayerNorm(d_model)
 
         self.positionwise_ff_layer = PositionwiseFeedforwardLayer(d_model=d_model,
                                                                   d_ff=d_ff,
-                                                                  dropout_ratio=dropout_ratio).to(self.device)
-        self.positionwise_ff_layer_norm = nn.LayerNorm(d_model).to(self.device)
+                                                                  dropout_ratio=dropout_ratio)
+        self.positionwise_ff_layer_norm = nn.LayerNorm(d_model)
 
-        self.dropout = nn.Dropout(dropout_ratio).to(self.device)
+        self.dropout = nn.Dropout(dropout_ratio)
 
     def forward(self, trg, enc_src, trg_mask, src_mask):
         # trg: [batch_size, trg_len, d_model]
@@ -594,23 +548,21 @@ class TransformerDecoderLayer(nn.Module):
 '''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
 TransformerDecoder
 '''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
-class TransformerDecoder(nn.Module):
-    def __init__(self, output_dim, d_k, d_v, d_model, n_layers, n_heads, d_ff, dropout_ratio, device, max_length=100):
+class TransformerDecoder(pl.LightningModule):
+    def __init__(self, output_dim, d_k, d_v, d_model, n_layers, n_heads, d_ff, dropout_ratio, max_length=100):
         super().__init__()
-        self.device = device
-
-        self.tok_embedding = nn.Embedding(output_dim, d_model).from_pretrained(trg_embed_mtrx).requires_grad_(False).to(self.device)
-        self.positional_encoding = PositionalEncoding(max_len_sentence, hparams.d_model, self.device)
+        self.pretrained_embedding = PretrainedEmbedding()
+        self.tok_embedding = nn.Embedding(output_dim, d_model).from_pretrained(self.pretrained_embedding.trg_embed_mtrx).requires_grad_(False)
+        self.positional_encoding = PositionalEncoding(max_len_sentence, hparams.d_model)
         self.layers = nn.ModuleList([TransformerDecoderLayer(d_k=d_k,
                                                              d_v=d_v,
                                                              d_model=d_model,
                                                              n_heads=n_heads,
                                                              d_ff=d_ff,
-                                                             dropout_ratio=dropout_ratio,
-                                                             device=device) for _ in range(n_layers)]).to(self.device)
-        self.affine = nn.Linear(d_model, output_dim).to(self.device)
-        self.dropout = nn.Dropout(dropout_ratio).to(self.device)
-        self.scale = torch.sqrt(torch.FloatTensor([d_k])).to(self.device)
+                                                             dropout_ratio=dropout_ratio) for _ in range(n_layers)])
+        self.affine = nn.Linear(d_model, output_dim)
+        self.dropout = nn.Dropout(dropout_ratio)
+        self.scale = torch.sqrt(torch.FloatTensor([d_k]))
 
     def forward(self, trg, enc_src, trg_mask, src_mask):
         batch_size = trg.shape[0]
@@ -620,7 +572,7 @@ class TransformerDecoder(nn.Module):
         # pos: [batch_size, trg_len]
         trg = self.dropout(self.tok_embedding(trg))
         # pe = get_sinusoid_encoding_table(trg_len, trg.shape[2], self.device)
-        trg = self.positional_encoding(trg).to(self.device)
+        trg = self.positional_encoding(trg)
 
         # '''+positional encoding'''
         # with torch.no_grad():
@@ -640,27 +592,29 @@ class TransformerDecoder(nn.Module):
 '''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
 Transformer
 '''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
-class Transformer(nn.Module):
-    def __init__(self, encoder, decoder, src_pad_idx, trg_pad_idx, device):
+class Transformer(pl.LightningModule):
+    def __init__(self, encoder, decoder, src_pad_idx, trg_pad_idx):
         super().__init__()
         self.encoder = encoder
         self.decoder = decoder
         self.src_pad_idx = src_pad_idx
         self.trg_pad_idx = trg_pad_idx
-        self.device = device
 
     def make_src_mask(self, src):
         # src: [batch_size, src_len]
-        src_mask = (src != self.src_pad_idx).unsqueeze(1).unsqueeze(2).to(self.device)
+        src_mask = (src != self.src_pad_idx).unsqueeze(1).unsqueeze(2)
+        src_mask = src_mask.type_as(src, device=self.device)
         # src_mask: [batch_size, 1, 1, src_len]
         return src_mask
 
     def make_trg_mask(self, trg):
         # trg: [batch_size, trg_len]
-        trg_pad_mask = (trg != self.trg_pad_idx).unsqueeze(1).unsqueeze(2).to(self.device)
+        trg_pad_mask = (trg != self.trg_pad_idx).unsqueeze(1).unsqueeze(2)
+        trg_pad_mask = trg_pad_mask.type_as(trg, device=self.device)
         # trg_pad_mask = [batch_size, 1, 1, trg_len]
         trg_len = trg.shape[1]
-        trg_attn_mask = torch.tril(torch.ones((trg_len, trg_len), device=self.device)).bool().to(self.device)
+        trg_attn_mask = torch.tril(torch.ones((trg_len, trg_len))).bool()
+        trg_attn_mask = trg_attn_mask.type_as(trg, device=self.device)
         # trg_attn_mask = [trg_len, trg_len]
         trg_mask = trg_pad_mask & trg_attn_mask
         return trg_mask
@@ -681,6 +635,17 @@ class Transformer(nn.Module):
         # output: [batch_size, trg_len, output_dim]
         # attention: [batch_size, n_heads, trg_len, src_len]
         return output, attention
+
+    def configure_optimizers(self):
+        warmup_steps = 4000
+        optimizer = torch.optim.Adam(model.parameters(), betas=(0.9, 0.98), eps=1e-09, lr=hparams.learning_rate)
+        # loss = LabelSmoothingLoss(smoothing=hparams.label_smoothing, classes=len(TRG.vocab.stoi), ignore_index=TRG_PAD_IDX)
+        scheduler = optim.lr_scheduler.LambdaLR(optimizer=optimizer,
+                                                lr_lambda=lambda steps: (hparams.d_model ** (-0.5)) * min(
+                                                    (steps + 1) ** (-0.5), (steps + 1) * warmup_steps ** (-1.5)),
+                                                last_epoch=-1,
+                                                verbose=False)
+        return [optimizer], [scheduler]
 
 '''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
 bleu score
@@ -741,7 +706,7 @@ refered to https://stackoverflow.com/questions/55681502/label-smoothing-in-pytor
 output (FloatTensor): batch_size x n_classes
 target (LongTensor): batch_size
 """
-class LabelSmoothingLoss(nn.Module):
+class LabelSmoothingLoss(pl.LightningModule):
     def __init__(self, classes, smoothing=0.0, dim=-1, weight = None, ignore_index=1):
         """if smoothing == 0, it's one-hot method
            if 0 < smoothing < 1, it's smooth method
@@ -770,41 +735,16 @@ class LabelSmoothingLoss(nn.Module):
 
         return torch.sum(torch.sum(-true_dist * pred, dim=self.dim)) / true_len
 
-'''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
-Preparing for Training
-'''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
-# prepare model
 INPUT_DIM = len(SRC.vocab.stoi)
 OUTPUT_DIM = len(TRG.vocab.stoi)
 
 SRC_PAD_IDX = SRC.vocab.stoi[SRC.pad_token]
 TRG_PAD_IDX = TRG.vocab.stoi[TRG.pad_token]
 
-enc = TransformerEncoder(input_dim=INPUT_DIM,
-                         d_k=hparams.d_k,
-                         d_v=hparams.d_v,
-                         d_model=hparams.d_model,
-                         n_layers=hparams.n_decoder,
-                         n_heads=hparams.n_heads,
-                         d_ff=hparams.d_ff,
-                         dropout_ratio=hparams.dropout_ratio,
-                         device=device).to(device)
-
-dec = TransformerDecoder(output_dim=OUTPUT_DIM,
-                         d_k=hparams.d_k,
-                         d_v=hparams.d_v,
-                         d_model=hparams.d_model,
-                         n_layers=hparams.n_decoder,
-                         n_heads=hparams.n_heads,
-                         d_ff=hparams.d_ff,
-                         dropout_ratio=hparams.dropout_ratio,
-                         device=device).to(device)
-
-model = Transformer(encoder=enc,
-                    decoder=dec,
-                    src_pad_idx=SRC_PAD_IDX,
-                    trg_pad_idx=TRG_PAD_IDX,
-                    device=device).to(device)
+'''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
+Preparing for Training
+'''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
+# prepare model
 
 if os.path.isfile(model_filepath):
     model.load_state_dict(torch.load(model_filepath, map_location=device))
@@ -817,15 +757,14 @@ print(f'The model has {utils.count_parameters(model):,} trainable parameters')
 sys.stdout.flush()
 
 '''set optimizer, scheduler and loss function'''
-optimizer = torch.optim.Adam(model.parameters(), betas=(0.9, 0.98), eps=1e-09, lr=hparams.learning_rate)
-warmup_steps = 4000
-scheduler = optim.lr_scheduler.LambdaLR(optimizer=optimizer,
-                                        lr_lambda=lambda steps:(hparams.d_model**(-0.5))*min((steps+1)**(-0.5), (steps+1)*warmup_steps**(-1.5)),
-                                        last_epoch=-1,
-                                        verbose=False)
+# optimizer = torch.optim.Adam(model.parameters(), betas=(0.9, 0.98), eps=1e-09, lr=hparams.learning_rate)
+# scheduler = optim.lr_scheduler.LambdaLR(optimizer=optimizer,
+#                                         lr_lambda=lambda steps:(hparams.d_model**(-0.5))*min((steps+1)**(-0.5), (steps+1)*warmup_steps**(-1.5)),
+#                                         last_epoch=-1,
+#                                         verbose=False)
 
 # loss_fn = nn.CrossEntropyLoss(ignore_index=TRG_PAD_IDX)
-loss_fn = LabelSmoothingLoss(smoothing=hparams.label_smoothing, classes=len(TRG.vocab.stoi), ignore_index=TRG_PAD_IDX)
+# loss_fn = LabelSmoothingLoss(smoothing=hparams.label_smoothing, classes=len(TRG.vocab.stoi), ignore_index=TRG_PAD_IDX)
 
 # parallel_model = DataParallelModel(model, device_ids=[0,1])
 # parallel_model.to(device)
@@ -833,13 +772,11 @@ loss_fn = LabelSmoothingLoss(smoothing=hparams.label_smoothing, classes=len(TRG.
 # parallel_loss.to(device)
 
 best_valid_loss = float('inf')
-
 '''
 since working enviornment takes too long to complete 1 epoch, make frequent log and save model
 logged after (iter_part * batch_size) are completed
 '''
 def train_model(model, iterator, optimizer, loss_fn, epoch_num, iter_part=150):
-
     global best_valid_loss
     total_length = len(train.examples)
     total_parts = total_length // (hparams.batch_size * iter_part)
@@ -913,7 +850,131 @@ def train_model(model, iterator, optimizer, loss_fn, epoch_num, iter_part=150):
             model.train()
             part_start_time = utils.time.time()
         del loss
-    return epoch_loss / len(iterator)
+    return epoch_loss / len(iterator
+
+'''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
+TrainModel for pytorch lightning
+'''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
+class TrainModel(pl.LightningModule):
+    def __init__(self):
+        enc = TransformerEncoder(input_dim=INPUT_DIM,
+                                 d_k=hparams.d_k,
+                                 d_v=hparams.d_v,
+                                 d_model=hparams.d_model,
+                                 n_layers=hparams.n_decoder,
+                                 n_heads=hparams.n_heads,
+                                 d_ff=hparams.d_ff,
+                                 dropout_ratio=hparams.dropout_ratio)
+
+        dec = TransformerDecoder(output_dim=OUTPUT_DIM,
+                                 d_k=hparams.d_k,
+                                 d_v=hparams.d_v,
+                                 d_model=hparams.d_model,
+                                 n_layers=hparams.n_decoder,
+                                 n_heads=hparams.n_heads,
+                                 d_ff=hparams.d_ff,
+                                 dropout_ratio=hparams.dropout_ratio)
+
+        self.model = Transformer(encoder=enc,
+                                 decoder=dec,
+                                 src_pad_idx=SRC_PAD_IDX,
+                                 trg_pad_idx=TRG_PAD_IDX)
+
+        self.loss = LabelSmoothingLoss(smoothing=hparams.label_smoothing, classes=len(TRG.vocab.stoi),
+                                       ignore_index=TRG_PAD_IDX)
+
+    def forward(self, x, y):
+        output, _ = self.model(src, trg[:, :-1])
+        output = output.contiguous().view(-1, output_dim)
+        return output
+
+    def training_step(self, x, y):
+        output = self(x, y)
+        y = y[:, 1:].contiguous().view(-1)
+        loss = self.loss(output, y)
+        return loss
+
+    def configure_optimizers(self):
+        optimizer = torch.optim.Adam(model.parameters(), betas=(0.9, 0.98), eps=1e-09, lr=hparams.learning_rate)
+        scheduler = optim.lr_scheduler.LambdaLR(optimizer=optimizer,
+                                                lr_lambda=lambda steps:(hparams.d_model**(-0.5))*min((steps+1)**(-0.5), (steps+1)*warmup_steps**(-1.5)),
+                                                last_epoch=-1,
+                                                verbose=False)
+        return optimizer, scheduler
+
+    def translate_sentences(self, sentence, SRC, TRG, max_len=50, logging=False):
+
+        self.model.eval()
+
+        if isinstance(sentence, str):
+            tokenizer = spacy.load('de_core_news_sm')
+            tokens = [token.text.lower() for token in tokenizer(sentence)]
+        else:
+            tokens = [token.lower() for token in sentence]
+
+        '''put <sos> in the first, <eos> in the end.'''
+        tokens = [SRC.init_token] + tokens + [SRC.eos_token]
+        '''convert to indexes'''
+        src_indexes = [SRC.vocab.stoi[token] for token in tokens]
+
+        if logging:
+            print(f'src tokens : {tokens}')
+            print(f'src indexes : {src_indexes}')
+
+        src_tensor = torch.LongTensor(src_indexes).unsqueeze(0).to(device)
+
+        src_pad_mask = model.make_src_mask(src_tensor)
+
+        with torch.no_grad():
+            enc_src = model.encoder(src_tensor, src_pad_mask)
+
+        '''always start with first token'''
+        trg_indexes = [TRG.vocab.stoi[TRG.init_token]]
+
+        for i in range(max_len):
+            trg_tensor = torch.LongTensor(trg_indexes).unsqueeze(0).to(device)
+            trg_mask = model.make_src_mask(trg_tensor)
+
+            with torch.no_grad():
+                output, attention = model.decoder(trg_tensor, enc_src, trg_mask, src_pad_mask)
+
+            # output: [batch_size, trg_len, output_dim]
+            pred_token = output.argmax(2)[:, -1].item()
+            trg_indexes.append(pred_token)
+
+            if pred_token == TRG.vocab.stoi[TRG.eos_token]:
+                break
+
+        trg_tokens = [TRG.vocab.itos[i] for i in trg_indexes]
+
+        return trg_tokens[1:], attention
+
+    def show_bleu_score(self, data, SRC, TRG, logging = False, max_len=50):
+        trgs = []
+        pred_trgs = []
+        index = 0
+
+        for datum in data:
+            src = vars(datum)['src']
+            trg = vars(datum)['trg']
+
+            pred_trg, _ = self.translate_sentences(src, SRC, TRG, max_len, logging=False)
+
+            # remove <eos>
+            pred_trg = pred_trg[:-1]
+
+            pred_trgs.append(pred_trg)
+            trgs.append([trg])
+
+            index += 1
+            if (index + 1) % 100 == 0 and logging:
+                print(f'[{index + 1}/{len(data)}]')
+                print(f'pred: {pred_trg}')
+                print(f'answer: {trg}')
+
+        bleu = bleu_score(pred_trgs, trgs, max_n=4, weights=[0.25, 0.25, 0.25, 0.25])
+        print(f'Total BLEU Score = {bleu * 100:.2f}')
+        sys.stdout.flush()
 
 '''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
 Evaluation
@@ -999,8 +1060,65 @@ def translate_sentence(sentence, SRC, TRG, model, device, max_len=50, logging=Fa
     return trg_tokens[1:], attention
 
 '''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
-Training
+custom callback
+from https://github.com/PyTorchLightning/pytorch-lightning/issues/2534#issuecomment-674582085
 '''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
+class CheckpointEveryNSteps(pl.Callback):
+    """
+    Save a checkpoint every N steps, instead of Lightning's default that checkpoints
+    based on validation loss.
+    """
+
+    def __init__(
+        self,
+        save_step_frequency,
+        prefix="N-Step-Checkpoint",
+        use_modelcheckpoint_filename=False,
+    ):
+        """
+        Args:
+            save_step_frequency: how often to save in steps
+            prefix: add a prefix to the name, only used if
+                use_modelcheckpoint_filename=False
+            use_modelcheckpoint_filename: just use the ModelCheckpoint callback's
+                default filename, don't use ours.
+        """
+        self.save_step_frequency = save_step_frequency
+        self.prefix = prefix
+        self.use_modelcheckpoint_filename = use_modelcheckpoint_filename
+
+    def on_batch_end(self, trainer: pl.Trainer, _):
+        global best_valid_loss
+        """ Check if we should save a checkpoint after every train batch """
+        epoch = trainer.current_epoch
+        global_step = trainer.global_step + 1
+        if global_step % self.save_step_frequency == 0:
+            if self.use_modelcheckpoint_filename:
+                filename = trainer.checkpoint_callback.filename
+            else:
+                filename = f"{self.prefix}_{epoch=}_{global_step=}.ckpt"
+            if trainer.callback_metrics['loss'] < best_valid_loss:
+                ckpt_path = os.path.join(trainer.checkpoint_callback.dirpath, filename)
+                trainer.save_checkpoint(ckpt_path)
+                best_valid_loss = trainer.callback_metrics['loss']
+            trainer.run_evaluation()
+            trainer.model.show_bleu_score(test, SRC, TRG)
+
+'''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
+Training for pytorch lightning
+'''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
+lr_monitor = LearningRateMonitor(logging_interval='step')
+trainer = pl.Trainer(gpus=[0,1],
+                     max_steps=100000,
+                     limit_train_batches=512,
+                     callbacks=[lr_monitor, CheckpointEveryNSteps(save_step_frequency=1)],
+                     deterministic=True)
+trainer.fit(model, train_loader, valid_loader)
+
+'''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
+Training for pytorch
+'''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
+'''
 for epoch in range(hparams.n_epochs):
     start_time = utils.time.time()
     train_loss = train_model(model, train_loader, optimizer, parallel_loss, epoch)
@@ -1020,10 +1138,11 @@ for epoch in range(hparams.n_epochs):
     print('---------------------------------------------------------')
     print('\n')
     sys.stdout.flush()
-
+'''
 '''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
 Generation Test
 '''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
+'''
 example_idx=10
 src = vars(test.examples[example_idx])['src']
 trg = vars(test.examples[example_idx])['trg']
@@ -1040,3 +1159,4 @@ print('result :', ' '.join(translation))
 
 
 show_bleu(test, SRC, TRG, model, device)
+'''
