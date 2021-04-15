@@ -878,7 +878,7 @@ def train_model(model, iterator, optimizer, loss_fn, epoch_num, iter_part=150):
         # trg: [batch_size*trg_len-1]
 
         # loss = loss_fn(output, trg)
-        loss = loss_fn(noutput, trg)
+        loss = loss_fn(output, trg)
         loss.backward()
 
         '''graident clipping'''
