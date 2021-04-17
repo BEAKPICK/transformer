@@ -40,6 +40,8 @@ nmt/
 *.pickle
 *.swp
 *.out
+pl_logs/
+runs/
 
 # PyInstaller
 #  Usually these files are written by a python script from a template
