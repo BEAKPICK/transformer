@@ -15,12 +15,13 @@ import torch
 import torch.optim as optim
 import torch.nn as nn
 from torch.utils.data import DataLoader, BatchSampler, RandomSampler, Sampler
-from torch.utils.tensorboard import SummaryWriter
+# from torch.utils.tensorboard import SummaryWriter
 
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks import LearningRateMonitor, Callback
 from pytorch_lightning.overrides.data_parallel import LightningDistributedDataParallel
 from pytorch_lightning.loggers import TensorBoardLogger
+from pytorch_lightning.plugins import DDPPlugin
 # from torch.nn.parallel.distributed import DistributedDataParallel
 # from parallel import DataParallelModel, DataParallelCriterion
 
@@ -37,6 +38,7 @@ import sys
 import os
 import os.path
 import random
+import math
 import dill as pickle
 import gzip
 import argparse 
@@ -71,10 +73,11 @@ spacy_en = spacy.load('en_core_web_sm')
 spacy_de = spacy.load('de_core_news_sm')
 
 share_vocab = True
-pretrained_embed = None
+# pretrained_embed = None
 best_valid_loss = float('inf')
 
-logger = TensorBoardLogger("runs", name="transformer_base")
+accumulate_loss = 0
+logger = TensorBoardLogger('runs', name='transformer_base', default_hp_metric=False) 
 
 def tokenize_en(text):
     return [token.text for token in spacy_en.tokenizer(text)]
@@ -189,7 +192,7 @@ DataLoader is recommended
 # et = utils.time.time()
 # m, s = utils.epoch_time(st, et)
 # print(f"bucketiterator splits complete | time : {m}m {s}s")
-# sys.stdout.flush()
+# sys.stdout.flush(pl_logs)
 
 '''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
 since BucketIterator is too slow (low GPU, high CPU),
@@ -279,12 +282,17 @@ def chunker(data, batch_size):
 et = utils.time.time()
 
 m, s = utils.epoch_time(st, et)
-print(f"data is ready | time : {m}m {s}s")
+print(f"data is ready")
+print(f"train_data : {len(train.examples)}")
+print(f"valid_data : {len(valid.examples)}")
+print(f"test_data : {len(test.examples)}")
+print(f"data example : {vars(train.examples[0])['src']}, {vars(train.examples[0])['trg']}")
+print(f"time : {m}m {s}s")
 sys.stdout.flush()
 
-train_loader = DataLoader(train_ds, batch_size=hparams.batch_size, num_workers=8, collate_fn=pad_data, pin_memory=True)
-valid_loader = DataLoader(valid_ds, batch_size=hparams.batch_size, num_workers=8, collate_fn=pad_data, pin_memory=True)
-test_loader = DataLoader(test_ds, batch_size=hparams.batch_size, num_workers=8, collate_fn=pad_data, pin_memory=True)
+train_loader = DataLoader(train_ds, batch_size=hparams.batch_size, collate_fn=pad_data, num_workers=16, pin_memory=True)
+valid_loader = DataLoader(valid_ds, batch_size=hparams.batch_size, collate_fn=pad_data, num_workers=16, pin_memory=True)
+test_loader = DataLoader(test_ds, batch_size=hparams.batch_size, collate_fn=pad_data, num_workers=1, pin_memory=True)
 
 # example
 # for i, batch in enumerate(dataloader):
@@ -295,21 +303,24 @@ test_loader = DataLoader(test_ds, batch_size=hparams.batch_size, num_workers=8, 
 '''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
 embedding
 '''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
-class PretrainedEmbedding(pl.LightningModule):
+class PretrainedEmbedding():
     def __init__(self):
         super().__init__()
-        global pretrained_embed
+        # global pretrained_embed
 
-        if pretrained_embed is not None:
-            self.src_embed_mtrx = pretrained_embed.src_embed_mtrx
-            self.trg_embed_mtrx = pretrained_embed.trg_embed_mtrx
-            return
+        # if pretrained_embed is not None:
+        #     self.src_embed_mtrx = pretrained_embed.src_embed_mtrx
+        #     self.trg_embed_mtrx = pretrained_embed.trg_embed_mtrx
+        #     return
 
         src_vocabsize = len(SRC.vocab.stoi)
         trg_vocabsize = len(TRG.vocab.stoi)
 
+        # self.register_buffer('src_embed_mtrx', torch.randn(src_vocabsize, hparams.d_model))
+        # self.register_buffer('trg_embed_mtrx', torch.randn(src_vocabsize, hparams.d_model))
         self.src_embed_mtrx = torch.randn(src_vocabsize, hparams.d_model)
-        self.trg_embed_mtrx = torch.randn(trg_vocabsize, hparams.d_model)
+        if not share_vocab:
+            self.trg_embed_mtrx = torch.randn(trg_vocabsize, hparams.d_model)
 
         '''
         for word2vec
@@ -339,7 +350,7 @@ class PretrainedEmbedding(pl.LightningModule):
                 self.src_embed_mtrx[SRC.vocab.stoi[word]] = torch.tensor(src_glove.word_vectors[src_glove.dictionary[word]].copy())
 
         for word in list(TRG.vocab.stoi.keys()):
-            if word in trg_glove.dictionary:
+            if word in trg_glove.dictionary and not share_vocab:
                 self.trg_embed_mtrx[SRC.vocab.stoi[word]] = torch.tensor(trg_glove.word_vectors[trg_glove.dictionary[word]].copy())
 
         pretrained_embed = self
@@ -347,6 +358,7 @@ class PretrainedEmbedding(pl.LightningModule):
         print("pretrained word embeddings loaded")
         sys.stdout.flush()
 
+pretrained_embedding = PretrainedEmbedding()
 
 '''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
 positional encoding
@@ -370,19 +382,36 @@ class PositionalEncoding(pl.LightningModule):
         @property
         def automatic_optimization(self):
             return True 
-        self.sinusoid_table = torch.FloatTensor(get_sinusoid_encoding_table(t_seq, d_model))
+        # self.sinusoid_table = torch.FloatTensor(get_sinusoid_encoding_table(t_seq, d_model))
+        self.register_buffer("sinusoid_table", torch.FloatTensor(get_sinusoid_encoding_table(t_seq, d_model)))
 
     def forward(self, x):
         x_len = x.shape[1]
-        sinusoid_table = self.sinusoid_table.type_as(x)
+        # sinusoid_table = self.sinusoid_table.type_as(x)
         with torch.no_grad():
-            result = torch.add(x, sinusoid_table[:x_len, :])
-        del sinusoid_table
+            result = torch.add(x, self.sinusoid_table[:x_len, :])
+        # del sinusoid_table
         return result
 
-    # def training_step(self, batch, batch_idx, optimizer_idx):
-    #     x = batch
-    #     return self(x)
+    def training_step(self, batch, batch_idx):
+        x = batch
+        return self.forward(x)
+
+    def optimizer_step(self, optimizer, opt_idx, batch_idx, train_step_and_backward_closure=None):
+        pass
+
+    def backward(self, result, optimizer, opt_idx):
+        pass
+
+    def configure_optimizers(self):
+        # warmup_steps = 4000
+        optimizer = torch.optim.Adam(self.parameters(), betas=(0.9, 0.98), eps=1e-09, lr=hparams.learning_rate)
+        scheduler = optim.lr_scheduler.LambdaLR(optimizer=optimizer,
+                                                lr_lambda=lambda steps:(hparams.d_model**(-0.5))*min((steps+1)**(-0.5), (steps+1)*hparams.warmup_steps**(-1.5)),
+                                                last_epoch=-1,
+                                                verbose=False)
+        # lr_scheduler = {'scheduler':scheduler, 'name':'base', 'interval':'step', 'frequency':1}
+        return [optimizer], [scheduler]
 
 '''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
 Self Attention
@@ -442,13 +471,23 @@ class MultiHeadAttentionLayer(pl.LightningModule):
         # x: [batch_size, query_len, d_model]
         return x, similarity_norm
 
-    # def training_step(self, batch, batch_idx, optimizer_idx):
-    #     try:
-    #         x, y, z = batch
-    #         return self(x,y,z)
-    #     except:
-    #         x, y, z, m = batch
-	#         return self(x, y, z, m)
+    def training_step(self, batch, batch_idx):
+        try:
+            x, y, z = batch
+            return self.forward(x,y,z)
+        except:
+            x, y, z, m = batch
+            return self.forward(x, y, z, m)
+
+    def configure_optimizers(self):
+        # warmup_steps = 4000
+        optimizer = torch.optim.Adam(self.parameters(), betas=(0.9, 0.98), eps=1e-09, lr=hparams.learning_rate)
+        scheduler = optim.lr_scheduler.LambdaLR(optimizer=optimizer,
+                                                lr_lambda=lambda steps:(hparams.d_model**(-0.5))*min((steps+1)**(-0.5), (steps+1)*hparams.warmup_steps**(-1.5)),
+                                                last_epoch=-1,
+                                                verbose=False)
+        # lr_scheduler = {'scheduler':scheduler, 'name':'my_log'}
+        return [optimizer], [scheduler]
 
 class PositionwiseFeedforwardLayer(pl.LightningModule):
     def __init__(self, d_model, d_ff, dropout_ratio):
@@ -470,9 +509,19 @@ class PositionwiseFeedforwardLayer(pl.LightningModule):
         # x: [batch_size, seq_len, d_model]
         return x
 
-    # def training_step(self, batch, batch_idx, optimizer_idx):
-    #     x = batch
-    #     return self(x)
+    def training_step(self, batch, batch_idx):
+        x = batch
+        return self.forward(x)
+
+    def configure_optimizers(self):
+        # warmup_steps = 4000
+        optimizer = torch.optim.Adam(self.parameters(), betas=(0.9, 0.98), eps=1e-09, lr=hparams.learning_rate)
+        scheduler = optim.lr_scheduler.LambdaLR(optimizer=optimizer,
+                                                lr_lambda=lambda steps:(hparams.d_model**(-0.5))*min((steps+1)**(-0.5), (steps+1)*hparams.warmup_steps**(-1.5)),
+                                                last_epoch=-1,
+                                                verbose=False)
+        # lr_scheduler = {'scheduler':scheduler, 'name':'my_log'}
+        return [optimizer], [scheduler]
 
 '''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
 TransformerEncoderLayer
@@ -509,9 +558,19 @@ class TransformerEncoderLayer(pl.LightningModule):
 
         return ff_add_norm_src
 
-    # def training_step(self, batch, batch_idx, optimizer_idx):
-    #     x, y = batch
-    #     return self(x, y)
+    def training_step(self, batch, batch_idx):
+        x, y = batch
+        return self.forward(x, y)
+
+    def configure_optimizers(self):
+        # warmup_steps = 4000
+        optimizer = torch.optim.Adam(self.parameters(), betas=(0.9, 0.98), eps=1e-09, lr=hparams.learning_rate)
+        scheduler = optim.lr_scheduler.LambdaLR(optimizer=optimizer,
+                                                lr_lambda=lambda steps:(hparams.d_model**(-0.5))*min((steps+1)**(-0.5), (steps+1)*hparams.warmup_steps**(-1.5)),
+                                                last_epoch=-1,
+                                                verbose=False)
+        # lr_scheduler = {'scheduler':scheduler, 'name':'my_log'}
+        return [optimizer], [scheduler]
 
 '''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
 TransformerEncoder
@@ -523,9 +582,13 @@ class TransformerEncoder(pl.LightningModule):
         def automatic_optimization(self):
             return True 
 
-        self.pretained_embedding = PretrainedEmbedding()
-        self.tok_embedding = nn.Embedding(input_dim, d_model).from_pretrained(self.pretained_embedding.src_embed_mtrx).requires_grad_(False)
-        self.positional_encoding = PositionalEncoding(max_len_sentence, hparams.d_model)
+        # self.pretained_embedding = PretrainedEmbedding()
+        self.tok_embedding = nn.Embedding(input_dim, d_model).from_pretrained(pretained_embedding.src_embed_mtrx).requires_grad_(False)
+        '''
+        since no <sos> <eos> are considered in max_len_sentence, we need to +2
+        '''
+        self.positional_encoding = PositionalEncoding(max_len_sentence+2, hparams.d_model)
+        self.positional_encoding.freeze()
         self.layers = nn.ModuleList([TransformerEncoderLayer(d_k=d_k,
                                                              d_v=d_v,
                                                              d_model=d_model,
@@ -553,9 +616,20 @@ class TransformerEncoder(pl.LightningModule):
 
         return src
 
-    # def training_step(self, batch, batch_idx, optimizer_idx):
-    #     x, y = batch
-    #     return self(x, y)
+    def training_step(self, batch, batch_idx):
+        x, y = batch
+        return self.forward(x, y)
+
+    def configure_optimizers(self):
+        # warmup_steps = 4000
+        optimizer = torch.optim.Adam(self.parameters(), betas=(0.9, 0.98), eps=1e-09, lr=hparams.learning_rate)
+        scheduler = optim.lr_scheduler.LambdaLR(optimizer=optimizer,
+                                                lr_lambda=lambda steps:(hparams.d_model**(-0.5))*min((steps+1)**(-0.5), (steps+1)*hparams.warmup_steps**(-1.5)),
+                                                last_epoch=-1,
+                                                verbose=False)
+        # lr_scheduler = {'scheduler':scheduler, 'name':'my_log'}
+        return [optimizer], [scheduler]
+
 
 '''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
 TransformerDecoderLayer
@@ -604,9 +678,19 @@ class TransformerDecoderLayer(pl.LightningModule):
 
         return ff_add_norm_trg, attention
 
-    # def training_step(self, batch, batch_idx, optimizer_idx):
-    #     x, y, tm, sm = batch
-    #     return self(x, y, tm, sm)
+    def training_step(self, batch, batch_idx):
+        x, y, tm, sm = batch
+        return self.forward(x, y, tm, sm)
+
+    def configure_optimizers(self):
+        # warmup_steps = 4000
+        optimizer = torch.optim.Adam(self.parameters(), betas=(0.9, 0.98), eps=1e-09, lr=hparams.learning_rate)
+        scheduler = optim.lr_scheduler.LambdaLR(optimizer=optimizer,
+                                                lr_lambda=lambda steps:(hparams.d_model**(-0.5))*min((steps+1)**(-0.5), (steps+1)*hparams.warmup_steps**(-1.5)),
+                                                last_epoch=-1,
+                                                verbose=False)
+        # lr_scheduler = {'scheduler':scheduler, 'name':'my_log'}
+        return [optimizer], [scheduler]
 
 
 '''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
@@ -617,10 +701,15 @@ class TransformerDecoder(pl.LightningModule):
         super().__init__()
         @property
         def automatic_optimization(self):
-            return True
-        self.pretrained_embedding = PretrainedEmbedding()
-        self.tok_embedding = nn.Embedding(output_dim, d_model).from_pretrained(self.pretrained_embedding.trg_embed_mtrx).requires_grad_(False)
-        self.positional_encoding = PositionalEncoding(max_len_sentence, hparams.d_model)
+            return True 
+        # self.pretrained_embedding = PretrainedEmbedding()
+        '''for shared embedding'''
+        self.tok_embedding = nn.Embedding(output_dim, d_model).from_pretrained(pretrained_embedding.src_embed_mtrx).requires_grad_(False)
+        '''
+        since no <sos> <eos> are considered in max_len_sentence, we need to +2
+        '''
+        self.positional_encoding = PositionalEncoding(max_len_sentence+2, hparams.d_model)
+        self.positional_encoding.freeze()
         self.layers = nn.ModuleList([TransformerDecoderLayer(d_k=d_k,
                                                              d_v=d_v,
                                                              d_model=d_model,
@@ -656,9 +745,19 @@ class TransformerDecoder(pl.LightningModule):
 
         return output, attention
 
-    # def training_step(self, batch, batch_idx, optimizer_idx):
-    #     x, y, tm, sm = batch
-    #     return self(x, y, tm, sm)
+    def training_step(self, batch, batch_idx):
+        x, y, tm, sm = batch
+        return self.forward(x, y, tm, sm)
+
+    def configure_optimizers(self):
+        # warmup_steps = 4000
+        optimizer = torch.optim.Adam(self.parameters(), betas=(0.9, 0.98), eps=1e-09, lr=hparams.learning_rate)
+        scheduler = optim.lr_scheduler.LambdaLR(optimizer=optimizer,
+                                                lr_lambda=lambda steps:(hparams.d_model**(-0.5))*min((steps+1)**(-0.5), (steps+1)*hparams.warmup_steps**(-1.5)),
+                                                last_epoch=-1,
+                                                verbose=False)
+        # lr_scheduler = {'scheduler':scheduler, 'name':'my_log'}
+        return [optimizer], [scheduler]
 
 '''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
 Transformer
@@ -711,9 +810,19 @@ class Transformer(pl.LightningModule):
         # attention: [batch_size, n_heads, trg_len, src_len]
         return output, attention
 
-    # def training_step(self, batch, batch_idx, optimizer_idx):
-    #     x, y = batch
-    #     return self(x, y)
+    def training_step(self, batch, batch_idx):
+        x, y = batch
+        return self.forward(x, y)
+
+    def configure_optimizers(self):
+        # warmup_steps = 4000
+        optimizer = torch.optim.Adam(self.parameters(), betas=(0.9, 0.98), eps=1e-09, lr=hparams.learning_rate)
+        scheduler = optim.lr_scheduler.LambdaLR(optimizer=optimizer,
+                                                lr_lambda=lambda steps:(hparams.d_model**(-0.5))*min((steps+1)**(-0.5), (steps+1)*hparams.warmup_steps**(-1.5)),
+                                                last_epoch=-1,
+                                                verbose=False)
+        # lr_scheduler = {'scheduler':scheduler, 'name':'my_log'}
+        return [optimizer], [scheduler]
 
 '''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
 bleu score
@@ -797,18 +906,24 @@ class LabelSmoothingLoss(pl.LightningModule):
         if self.weight is not None:
             pred = pred * self.weight.unsqueeze(0)
 
-        true_dist = torch.zeros_like(pred)
-        true_dist.fill_(self.smoothing / (self.cls - 1))
-        true_dist.scatter_(1, target.data.unsqueeze(1), self.confidence)
-        true_dist.masked_fill_((target == self.ignore_index).unsqueeze(1), 0)
-        true_len = len([i for i in target if i!=self.ignore_index])
-        result = torch.sum(torch.sum(-true_dist * pred, dim=self.dim)) / true_len
+        with torch.enable_grad():
+            true_dist = torch.zeros_like(pred)
+            true_dist.fill_(self.smoothing / (self.cls - 1))
+            true_dist.scatter_(1, target.data.unsqueeze(1), self.confidence)
+            true_dist.masked_fill_((target == self.ignore_index).unsqueeze(1), 0)
+            true_len = len([i for i in target if i!=self.ignore_index])
+        return torch.sum(torch.sum(-true_dist * pred, dim=self.dim)) / true_len
 
-        return result
 
-    # def training_step(self, batch, batch_idx, optimizer_idx):
-    #     x, y = batch
-    #     return self(x, y)
+    def training_step(self, batch, batch_idx, optimizer_idx):
+        x, y = batch
+        return self.forward(x, y)
+
+    def optimizer_step(self, optimizer, opt_idx, batch_idx, train_step_and_backward_closure=None):
+        pass
+
+    def backward(self, result, optimizer, opt_idx):
+        pass
 
 INPUT_DIM = len(SRC.vocab.stoi)
 OUTPUT_DIM = len(TRG.vocab.stoi)
@@ -817,10 +932,11 @@ SRC_PAD_IDX = SRC.vocab.stoi[SRC.pad_token]
 TRG_PAD_IDX = TRG.vocab.stoi[TRG.pad_token]
 
 '''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
-Preparing for Training
+Preparing for Training (pytorch)
 '''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
-# prepare model
-
+'''
+instance and initialize model. This moved to pl hoods 'init' at TrainModel
+'''
 # if os.path.isfile(model_filepath):
 #     model.load_state_dict(torch.load(model_filepath, map_location=device))
 #     print('model loaded from saved file')
@@ -831,7 +947,9 @@ Preparing for Training
 # print(f'The model has {utils.count_parameters(model):,} trainable parameters')
 # sys.stdout.flush()
 
-'''set optimizer, scheduler and loss function'''
+'''
+set optimizer, scheduler and loss function. This moved to pl hoods 'configure_optimizers'
+'''
 # optimizer = torch.optim.Adam(model.parameters(), betas=(0.9, 0.98), eps=1e-09, lr=hparams.learning_rate)
 # scheduler = optim.lr_scheduler.LambdaLR(optimizer=optimizer,
 #                                         lr_lambda=lambda steps:(hparams.d_model**(-0.5))*min((steps+1)**(-0.5), (steps+1)*warmup_steps**(-1.5)),
@@ -847,6 +965,8 @@ Preparing for Training
 # parallel_loss.to(device)
 
 '''
+train method for pytorch single gpu version.
+
 since working enviornment takes too long to complete 1 epoch, make frequent log and save model
 logged after (iter_part * batch_size) are completed
 '''
@@ -926,9 +1046,141 @@ def train_model(model, iterator, optimizer, loss_fn, epoch_num, iter_part=150):
         del loss
     return epoch_loss / len(iterator)
 
+
+
 '''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
-TrainModel for pytorch lightning
+Evaluation (pytorch)
 '''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
+def evaluate_model(model, iterator, loss_fn):
+    model.eval()
+    epoch_loss = 0
+
+    with torch.no_grad():
+        for i, batch in enumerate(iterator):
+            src = batch[0].to(device, non_blocking=True)
+            trg = batch[1].to(device, non_blocking=True)
+
+            output, _ = model(src, trg[:, :-1])
+
+            output_dim = output.shape[-1]
+
+            '''exclude <eos> for decoder input'''
+            output, _ = model(src, trg[:, :-1])
+            # output: [batch_size, trg_len-1, output_dim]
+
+            output_dim = output.shape[-1]
+            output = output.contiguous().view(-1, output_dim)
+            # output: [batch_size*trg_len-1, output_dim]
+
+            trg = trg[:, 1:].contiguous().view(-1)
+            # trg: [batch_size*trg_len-1]
+
+            loss = loss_fn(output, trg)
+
+            '''total loss in each epochs'''
+            epoch_loss += float(loss.item())
+
+    return epoch_loss / len(iterator)
+
+'''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
+Generation (pytorch)
+'''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
+def translate_sentence(sentence, SRC, TRG, model, device, max_len=50, logging=False):
+    model.eval()
+
+    if isinstance(sentence, str):
+        tokenizer = spacy.load('de_core_news_sm')
+        tokens = [token.text.lower() for token in tokenizer(sentence)]
+    else:
+        tokens = [token.lower() for token in sentence]
+
+    '''put <sos> in the first, <eos> in the end.'''
+    tokens = [SRC.init_token] + tokens + [SRC.eos_token]
+    '''convert to indexes'''
+    src_indexes = [SRC.vocab.stoi[token] for token in tokens]
+
+    if logging:
+        print(f'src tokens : {tokens}')
+        print(f'src indexes : {src_indexes}')
+
+    src_tensor = torch.LongTensor(src_indexes).unsqueeze(0).to(device)
+
+    src_pad_mask = model.make_src_mask(src_tensor)
+
+    with torch.no_grad():
+        enc_src = model.encoder(src_tensor, src_pad_mask)
+
+    '''always start with first token'''
+    trg_indexes = [TRG.vocab.stoi[TRG.init_token]]
+
+    for i in range(max_len):
+        trg_tensor = torch.LongTensor(trg_indexes).unsqueeze(0).to(device)
+        trg_mask = model.make_src_mask(trg_tensor)
+
+        with torch.no_grad():
+            output, attention = model.decoder(trg_tensor, enc_src, trg_mask, src_pad_mask)
+
+        # output: [batch_size, trg_len, output_dim]
+        pred_token = output.argmax(2)[:,-1].item()
+        trg_indexes.append(pred_token)
+
+        if pred_token == TRG.vocab.stoi[TRG.eos_token]:
+            break
+
+    trg_tokens = [TRG.vocab.itos[i] for i in trg_indexes]
+
+    return trg_tokens[1:], attention
+
+'''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
+Training (pytorch)
+'''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
+'''
+for epoch in range(hparams.n_epochs):
+    start_time = utils.time.time()
+    train_loss = train_model(model, train_loader, optimizer, parallel_loss, epoch)
+    valid_loss = evaluate_model(model, valid_loader, parallel_loss)
+    end_time = utils.time.time()
+    epoch_mins, epoch_secs = utils.epoch_time(start_time, end_time)
+
+    if valid_loss < best_valid_loss:
+        best_valid_loss = valid_loss
+        torch.save(model.state_dict(), '{model_name}.pt')
+        print('model saved')
+    print('---------------------------------------------------------')
+    print(f'Epoch: {epoch+1:03} Time: {epoch_mins}m {epoch_secs}s')
+    print(f'Train Loss: {train_loss:.3f} Train PPL: {utils.math.exp(train_loss):.3f}')
+    print(f'Validation Loss: {valid_loss:.3f} Validation PPL: {utils.math.exp(valid_loss):.3f}')
+    show_bleu(test, SRC, TRG, model, device)
+    print('---------------------------------------------------------')
+    print('\n')
+    sys.stdout.flush()
+'''
+'''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
+Generation Test (pytorch)
+'''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
+'''
+example_idx=10
+src = vars(test.examples[example_idx])['src']
+trg = vars(test.examples[example_idx])['trg']
+print('generation:')
+print(f'src : {src}')
+print(f'trg : {trg}')
+translation, attention = translate_sentence(sentence=src,
+                                            SRC=SRC,
+                                            TRG=TRG,
+                                            model=model,
+                                            device=device)
+print('result :', ' '.join(translation))
+
+
+
+show_bleu(test, SRC, TRG, model, device)
+'''
+
+'''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
+TrainModel (pytorch lightning)
+'''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
+
 class TrainModel(pl.LightningModule):
     @property
     def automatic_optimization(self):
@@ -964,31 +1216,56 @@ class TrainModel(pl.LightningModule):
 
         self.loss = LabelSmoothingLoss(smoothing=hparams.label_smoothing, classes=len(TRG.vocab.stoi),
                                        ignore_index=TRG_PAD_IDX)
-
+        
+        self.loss.freeze()
+        self.model.apply(utils.initalize_weights)
+        '''
+        pytorch lightning shows parameter summery already
+        '''
         # print(f'The model has {utils.count_parameters(self.model):,} trainable parameters')
         # sys.stdout.flush()
 
     def forward(self, x, y):
         output, _ = self.model(x, y[:, :-1])
         output_dim = output.shape[-1]
-        output = output.contiguous().view(-1, output_dim)
+        output = output.contiguous().view(-1, output_dm)
         return output
 
     def training_step(self, batch, batch_idx):
-        global current_loss
         x, y = batch
         output, _ = self.model(x, y[:, :-1])
         output_dim = output.shape[-1]
         output = output.contiguous().view(-1, output_dim)
         y = y[:, 1:].contiguous().view(-1)
         loss = self.loss(output, y)
-        # self.manual_backward(loss)
-        self.log('train_loss', loss)
-        self.log('train_PPL', torch.exp(loss.float()))
-        # writer.add_scalar('Loss/train_ppl', torch.exp(loss.clone().detach().requires_grad_(False)), batch_idx)
-        # writer.add_scalar('Loss/train', loss, batch_idx)
+        self.log("train_loss", loss, sync_dist=True, prog_bar=True)
+        self.log('train_PPL', torch.exp(loss), sync_dist=True)
 
-        return {'loss':loss, 'PPL':torch.exp(loss.float())}
+        # self.model.train()
+        # self.manual_backward(loss)
+
+        # optimizer.step()
+        # scheduler.step()
+
+        '''total loss in each epochs'''
+        # global accumulate_loss
+        # accumulate_loss += loss.item()
+        # batches_loss = accumulate_loss / (batch_idx+1)
+        # self.log('train_PPL', torch.exp(loss.float()), on_step=True, on_epoch=False, sync_dist=True, prog_bar=True, logger=True)
+        # self.log('train_PPL', np.exp(batches_loss), sync_dist=True, prog_bar=True, logger=True)
+        # self.log('train_loss', loss.float(), on_step=True, on_epoch=False, sync_dist=True, prog_bar=True, logger=True)
+        # self.log('train_loss', batches_loss, sync_dist=True, prog_bar=True, logger=True)
+        # self.logger.experiment.add_scalar('Train/train_PPL', torch.exp(loss.float()), batch_idx)
+        # self.logger.experiment.add_scalar('Train/train_loss', loss.float(), batch_idx)
+        # tensorboard_logs = {'train_loss': loss, 'train_PPL': torch.exp(loss.float())}
+        # return {'loss':batches_loss}
+        return loss
+
+    def training_epoch_end(self, outs):
+        loss = torch.stack([outs[i]['loss'] for i in range(len(outs))]).mean()
+        self.log("train_loss", loss, sync_dist=True, prog_bar=True)
+        self.log('train_PPL', torch.exp(loss), sync_dist=True)
+        
 
     def validation_step(self, batch, batch_idx):
         x, y = batch
@@ -997,26 +1274,42 @@ class TrainModel(pl.LightningModule):
         output = output.contiguous().view(-1, output_dim)
         y = y[:, 1:].contiguous().view(-1)
         loss = self.loss(output, y)
-        self.log('val_loss', loss, on_step=True)
-        self.log('val_PPL', torch.exp(loss.float()))
-        # writer.add_scalar('Loss/valid_ppl', torch.exp(loss.clone().detach().requires_grad_(False)), batch_idx)
-        # writer.add_scalar('Loss/valid', loss, batch_idx)
-        return {'loss':loss, 'PPL':torch.exp(loss.float())}
+        self.log("val_loss", loss, sync_dist=True)
+        self.log('val_PPL', torch.exp(loss), sync_dist=True)
+        # '''total loss in each epochs'''
+        # global accumulate_loss
+        # accumulate_loss += float(loss.item())
+        # batches_loss = accumulate_loss / (batch_idx+1)
+        # self.log('valid_PPL', torch.exp(loss.float()), on_step=True, on_epoch=False, sync_dist=True, prog_bar=True, logger=True)
+        # self.log('valid_PPL', np.exp(batches_loss), sync_dist=True, prog_bar=True, logger=True)
+        # self.log('valid_loss', loss.float(), on_step=True, on_epoch=False, sync_dist=True, prog_bar=True, logger=True)
+        # self.log('valid_loss', batches_loss, sync_dist=True, prog_bar=True, logger=True)
+        # self.logger.experiment,
+		# self.logger.experiment.add_scalar('Valid/valid_PPL', torch.exp(loss.float()), batch_idx)
+        # self.logger.experiment.add_scalar('Valid/valid_loss', loss.float(), batch_idx)
+        return loss
 
+    def validation_epoch_end(self, outs):
+        loss = torch.stack(outs).mean()
+        self.log("val_loss", loss, sync_dist=True)
+        self.log('val_PPL', torch.exp(loss), sync_dist=True)
+    
     def configure_optimizers(self):
-        warmup_steps = 4000
-        optimizer = torch.optim.Adam(model.parameters(), betas=(0.9, 0.98), eps=1e-09, lr=hparams.learning_rate)
+        # warmup_steps = 4000
+        optimizer = torch.optim.Adam(self.parameters(), betas=(0.9, 0.98), eps=1e-09, lr=hparams.learning_rate)
         scheduler = optim.lr_scheduler.LambdaLR(optimizer=optimizer,
-                                                lr_lambda=lambda steps:(hparams.d_model**(-0.5))*min((steps+1)**(-0.5), (steps+1)*warmup_steps**(-1.5)),
+                                                lr_lambda=lambda steps:(hparams.d_model**(-0.5))*min((steps+1)**(-0.5), (steps+1)*hparams.warmup_steps**(-1.5)),
                                                 last_epoch=-1,
                                                 verbose=False)
         # lr_scheduler = {'scheduler':scheduler, 'name':'my_log'}
-        return optimizer#, [scheduler]
+        return [optimizer], [scheduler]
 
-    def configure_ddp(self, model, device_ids):
-        model = LightningDistributedDataParallel(model, device_ids, find_unused_parameters=False)
-        return model
-
+    def get_progress_bar_dict(self):
+        tqdm_dict = super().get_progress_bar_dict()
+        if 'v_num' in tqdm_dict:
+            del tqdm_dict['v_num']
+        return tqdm_dict
+		
     def translate_sentences(self, sentence, SRC, TRG, max_len=50, logging=False):
 
         self.model.eval()
@@ -1092,90 +1385,7 @@ class TrainModel(pl.LightningModule):
         sys.stdout.flush()
 
 '''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
-Evaluation
-'''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
-def evaluate_model(model, iterator, loss_fn):
-    model.eval()
-    epoch_loss = 0
-
-    with torch.no_grad():
-        for i, batch in enumerate(iterator):
-            src = batch[0].to(device, non_blocking=True)
-            trg = batch[1].to(device, non_blocking=True)
-
-            output, _ = model(src, trg[:, :-1])
-
-            output_dim = output.shape[-1]
-
-            '''exclude <eos> for decoder input'''
-            output, _ = model(src, trg[:, :-1])
-            # output: [batch_size, trg_len-1, output_dim]
-
-            output_dim = output.shape[-1]
-            output = output.contiguous().view(-1, output_dim)
-            # output: [batch_size*trg_len-1, output_dim]
-
-            trg = trg[:, 1:].contiguous().view(-1)
-            # trg: [batch_size*trg_len-1]
-
-            loss = loss_fn(output, trg)
-
-            '''total loss in each epochs'''
-            epoch_loss += float(loss.item())
-
-    return epoch_loss / len(iterator)
-
-'''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
-Generation
-'''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
-def translate_sentence(sentence, SRC, TRG, model, device, max_len=50, logging=False):
-    model.eval()
-
-    if isinstance(sentence, str):
-        tokenizer = spacy.load('de_core_news_sm')
-        tokens = [token.text.lower() for token in tokenizer(sentence)]
-    else:
-        tokens = [token.lower() for token in sentence]
-
-    '''put <sos> in the first, <eos> in the end.'''
-    tokens = [SRC.init_token] + tokens + [SRC.eos_token]
-    '''convert to indexes'''
-    src_indexes = [SRC.vocab.stoi[token] for token in tokens]
-
-    if logging:
-        print(f'src tokens : {tokens}')
-        print(f'src indexes : {src_indexes}')
-
-    src_tensor = torch.LongTensor(src_indexes).unsqueeze(0).to(device)
-
-    src_pad_mask = model.make_src_mask(src_tensor)
-
-    with torch.no_grad():
-        enc_src = model.encoder(src_tensor, src_pad_mask)
-
-    '''always start with first token'''
-    trg_indexes = [TRG.vocab.stoi[TRG.init_token]]
-
-    for i in range(max_len):
-        trg_tensor = torch.LongTensor(trg_indexes).unsqueeze(0).to(device)
-        trg_mask = model.make_src_mask(trg_tensor)
-
-        with torch.no_grad():
-            output, attention = model.decoder(trg_tensor, enc_src, trg_mask, src_pad_mask)
-
-        # output: [batch_size, trg_len, output_dim]
-        pred_token = output.argmax(2)[:,-1].item()
-        trg_indexes.append(pred_token)
-
-        if pred_token == TRG.vocab.stoi[TRG.eos_token]:
-            break
-
-    trg_tokens = [TRG.vocab.itos[i] for i in trg_indexes]
-
-    return trg_tokens[1:], attention
-
-'''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
-custom callback
+custom callback (pytorch lightning)
 from https://github.com/PyTorchLightning/pytorch-lightning/issues/2534#issuecomment-674582085
 '''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
 class CheckpointEveryNSteps(pl.Callback):
@@ -1207,7 +1417,6 @@ class CheckpointEveryNSteps(pl.Callback):
     #     return model
 
     def on_batch_end(self, trainer: pl.Trainer, _):
-        global best_valid_loss
         """ Check if we should save a checkpoint after every train batch """
         epoch = trainer.current_epoch
         global_step = trainer.global_step + 1
@@ -1218,70 +1427,36 @@ class CheckpointEveryNSteps(pl.Callback):
                 filename = f"{self.prefix}_{epoch=}_{global_step=}.ckpt"
                 ckpt_path = os.path.join(trainer.checkpoint_callback.dirpath, filename)
                 trainer.save_checkpoint(ckpt_path)
-            trainer.run_evaluation()
+            # trainer.run_evaluation()
             # trainer.model.show_bleu_score(test, SRC, TRG)
+    # def on_epoch_end(self, trainer: pl.Trainer, _):
+    #     global accumulate_loss
+    #     accumulate_loss=0
 
 '''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
-Training for pytorch lightning
+Training (pytorch lightning)
 '''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
 parser = argparse.ArgumentParser()
 parser.add_argument("--gpus", type=int, default=1, help='the number of gpus')
 args = parser.parse_args()
 
 model = TrainModel()
-# lr_monitor = LearningRateMonitor(logging_interval='step')
+lr_monitor = LearningRateMonitor(logging_interval='step')
+nstep_check = CheckpointEveryNSteps(save_step_frequency=100000)
+
+max_steps = int(math.floor((len(train.examples) * hparams.n_epochs) / args.gpus))
 trainer = pl.Trainer(gpus=args.gpus,
-                     max_epochs=90,
-                     limit_train_batches=32,
-                     callbacks=[CheckpointEveryNSteps(save_step_frequency=1)],
+                     max_steps=max_steps,
+                     callbacks=[nstep_check, lr_monitor],
+                     val_check_interval=1,
                      deterministic=True,
 					 accelerator="ddp",
                      logger=logger,
-					 flush_logs_every_n_steps=1)
+					 flush_logs_every_n_steps=1,
+                     log_every_n_steps=1,
+                     profiler="pytorch",
+					 progress_bar_refresh_rate=0,
+					 plugins=DDPPlugin(find_unused_parameters=False),
+					 enable_pl_optimizer=False,
+                     precision=16)
 trainer.fit(model, train_loader, valid_loader)
-
-'''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
-Training for pytorch
-'''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
-'''
-for epoch in range(hparams.n_epochs):
-    start_time = utils.time.time()
-    train_loss = train_model(model, train_loader, optimizer, parallel_loss, epoch)
-    valid_loss = evaluate_model(model, valid_loader, parallel_loss)
-    end_time = utils.time.time()
-    epoch_mins, epoch_secs = utils.epoch_time(start_time, end_time)
-
-    if valid_loss < best_valid_loss:
-        best_valid_loss = valid_loss
-        torch.save(model.state_dict(), '{model_name}.pt')
-        print('model saved')
-    print('---------------------------------------------------------')
-    print(f'Epoch: {epoch+1:03} Time: {epoch_mins}m {epoch_secs}s')
-    print(f'Train Loss: {train_loss:.3f} Train PPL: {utils.math.exp(train_loss):.3f}')
-    print(f'Validation Loss: {valid_loss:.3f} Validation PPL: {utils.math.exp(valid_loss):.3f}')
-    show_bleu(test, SRC, TRG, model, device)
-    print('---------------------------------------------------------')
-    print('\n')
-    sys.stdout.flush()
-'''
-'''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
-Generation Test
-'''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
-'''
-example_idx=10
-src = vars(test.examples[example_idx])['src']
-trg = vars(test.examples[example_idx])['trg']
-print('generation:')
-print(f'src : {src}')
-print(f'trg : {trg}')
-translation, attention = translate_sentence(sentence=src,
-                                            SRC=SRC,
-                                            TRG=TRG,
-                                            model=model,
-                                            device=device)
-print('result :', ' '.join(translation))
-
-
-
-show_bleu(test, SRC, TRG, model, device)
-'''
