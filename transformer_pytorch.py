@@ -582,8 +582,8 @@ class TransformerEncoder(pl.LightningModule):
         def automatic_optimization(self):
             return True 
 
-        # self.pretained_embedding = PretrainedEmbedding()
-        self.tok_embedding = nn.Embedding(input_dim, d_model).from_pretrained(pretained_embedding.src_embed_mtrx).requires_grad_(False)
+        # self.pretrained_embedding = PretrainedEmbedding()
+        self.tok_embedding = nn.Embedding(input_dim, d_model).from_pretrained(pretrained_embedding.src_embed_mtrx).requires_grad_(False)
         '''
         since no <sos> <eos> are considered in max_len_sentence, we need to +2
         '''
