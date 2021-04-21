@@ -552,17 +552,16 @@ class TransformerEncoderLayer(pl.LightningModule):
         self.dropout = nn.Dropout(dropout_ratio)
 
     def forward(self, src, src_mask):
-        with profiler.record_function("TransformerEncoderLayer"):
-            # src: [batch_size, src_len, d_model]
-            # src_mask: [batch_size, src_len]
+        # src: [batch_size, src_len, d_model]
+        # src_mask: [batch_size, src_len]
 
-            attn_src, _ = self.self_attn_layer(src, src, src, src_mask)
-            attn_add_norm_src = self.self_attn_layer_norm(src + self.dropout(attn_src))
+        attn_src, _ = self.self_attn_layer(src, src, src, src_mask)
+        attn_add_norm_src = self.self_attn_layer_norm(src + self.dropout(attn_src))
 
-            ff_src = self.positionwise_ff_layer(attn_add_norm_src)
-            ff_add_norm_src = self.positionwise_ff_layer_norm(self.dropout(attn_add_norm_src) + ff_src)
+        ff_src = self.positionwise_ff_layer(attn_add_norm_src)
+        ff_add_norm_src = self.positionwise_ff_layer_norm(self.dropout(attn_add_norm_src) + ff_src)
 
-            return ff_add_norm_src
+        return ff_add_norm_src
 
     def training_step(self, batch, batch_idx):
         x, y = batch
@@ -606,23 +605,22 @@ class TransformerEncoder(pl.LightningModule):
         self.scale = torch.sqrt(torch.FloatTensor([d_k]))
 
     def forward(self, src, src_mask):
-        with profiler.record_function("TransformerEncoder"):
-            batch_size =src.shape[0]
-            src_len = src.shape[1]
+        batch_size =src.shape[0]
+        src_len = src.shape[1]
 
-            '''to map position index information'''
+        '''to map position index information'''
 
-            # pos = torch.arange(0, src_len).unsqueeze(0).repeat(batch_size, 1).to(self.device)
-            src = self.dropout(self.tok_embedding(src))
-            # pe = get_sinusoid_encoding_table(src_len, src.shape[2], self.device)
-            # +positional encoding
-            src = self.positional_encoding(src)
-            # del pe
-            # src: [batch_size, src_len, d_model]
-            for layer in self.layers:
-                src = layer(src, src_mask)
+        # pos = torch.arange(0, src_len).unsqueeze(0).repeat(batch_size, 1).to(self.device)
+        src = self.dropout(self.tok_embedding(src))
+        # pe = get_sinusoid_encoding_table(src_len, src.shape[2], self.device)
+        # +positional encoding
+        src = self.positional_encoding(src)
+        # del pe
+        # src: [batch_size, src_len, d_model]
+        for layer in self.layers:
+            src = layer(src, src_mask)
 
-            return src
+        return src
 
     def training_step(self, batch, batch_idx):
         x, y = batch
@@ -673,20 +671,19 @@ class TransformerDecoderLayer(pl.LightningModule):
         self.dropout = nn.Dropout(dropout_ratio)
 
     def forward(self, trg, enc_src, trg_mask, src_mask):
-        with profiler.record_function("TransformerDecoderLayer"):
-            # trg: [batch_size, trg_len, d_model]
-            # enc_src: [batch_size, src_len, d_model]
-            # trg_mask: [batch_size, trg_len]
-            # enc_mask: [batch_size, src_len]
+        # trg: [batch_size, trg_len, d_model]
+        # enc_src: [batch_size, src_len, d_model]
+        # trg_mask: [batch_size, trg_len]
+        # enc_mask: [batch_size, src_len]
 
-            self_attn_trg, _ = self.self_attn_layer(trg, trg, trg, trg_mask)
-            self_attn_add_norm_trg = self.self_attn_layer_norm(trg + self.dropout(self_attn_trg))
-            enc_dec_attn_trg, attention = self.enc_dec_attn_layer(self_attn_add_norm_trg, enc_src, enc_src, src_mask)
-            enc_dec_add_norm_trg = self.enc_dec_attn_layer_norm(self_attn_add_norm_trg + self.dropout(enc_dec_attn_trg))
-            ff_trg = self.positionwise_ff_layer(enc_dec_add_norm_trg)
-            ff_add_norm_trg = self.positionwise_ff_layer_norm(enc_dec_add_norm_trg + self.dropout(ff_trg))
+        self_attn_trg, _ = self.self_attn_layer(trg, trg, trg, trg_mask)
+        self_attn_add_norm_trg = self.self_attn_layer_norm(trg + self.dropout(self_attn_trg))
+        enc_dec_attn_trg, attention = self.enc_dec_attn_layer(self_attn_add_norm_trg, enc_src, enc_src, src_mask)
+        enc_dec_add_norm_trg = self.enc_dec_attn_layer_norm(self_attn_add_norm_trg + self.dropout(enc_dec_attn_trg))
+        ff_trg = self.positionwise_ff_layer(enc_dec_add_norm_trg)
+        ff_add_norm_trg = self.positionwise_ff_layer_norm(enc_dec_add_norm_trg + self.dropout(ff_trg))
 
-            return ff_add_norm_trg, attention
+        return ff_add_norm_trg, attention
 
     def training_step(self, batch, batch_idx):
         x, y, tm, sm = batch
@@ -732,30 +729,28 @@ class TransformerDecoder(pl.LightningModule):
         self.scale = torch.sqrt(torch.FloatTensor([d_k]))
 
     def forward(self, trg, enc_src, trg_mask, src_mask):
-        with profiler.record_function("TransformerDecoder"):
-            batch_size = trg.shape[0]
-            trg_len = trg.shape[1]
+        batch_size = trg.shape[0]
+        trg_len = trg.shape[1]
 
-            # pos = torch.arange(0, trg_len).unsqueeze(0).repeat(batch_size, 1).to(self.device)
-            # pos: [batch_size, trg_len]
-            trg = self.dropout(self.tok_embedding(trg))
-            # pe = get_sinusoid_encoding_table(trg_len, trg.shape[2], self.device)
-            trg = self.positional_encoding(trg)
+        # pos = torch.arange(0, trg_len).unsqueeze(0).repeat(batch_size, 1).to(self.device)
+        # pos: [batch_size, trg_len]
+        trg = self.dropout(self.tok_embedding(trg))
+        # pe = get_sinusoid_encoding_table(trg_len, trg.shape[2], self.device)
+        trg = self.positional_encoding(trg)
 
-            # '''+positional encoding'''
-            # with torch.no_grad():
-            #     trg += sinusoid_encoding_table[:trg_len, :]
+        # '''+positional encoding'''
+        # with torch.no_grad():
+        #     trg += sinusoid_encoding_table[:trg_len, :]
 
-            # del pe
-            # trg: [batch_size, trg_len, d_model]
+        # del pe
+        # trg: [batch_size, trg_len, d_model]
 
-            for layer in self.layers:
-                trg, attention = layer(trg, enc_src, trg_mask, src_mask)
+        for layer in self.layers:
+            trg, attention = layer(trg, enc_src, trg_mask, src_mask)
 
-            output = self.affine(trg)
-            # output: [batch_size, trg_len, output_len]
-
-            return output, attention
+        output = self.affine(trg)
+        # output: [batch_size, trg_len, output_len]
+        return output, attention
 
     def training_step(self, batch, batch_idx):
         x, y, tm, sm = batch
@@ -1473,7 +1468,6 @@ trainer = pl.Trainer(gpus=args.gpus,
                      logger=logger,
 					 flush_logs_every_n_steps=1,
                      log_every_n_steps=1,
-                     profiler="pytorch",
 					 progress_bar_refresh_rate=20,
 					 plugins=DDPPlugin(find_unused_parameters=False),
 					 enable_pl_optimizer=False,
