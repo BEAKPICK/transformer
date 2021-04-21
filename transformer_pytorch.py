@@ -802,23 +802,20 @@ class Transformer(pl.LightningModule):
         return trg_mask
 
     def forward(self, src, trg):
-        with profiler.profile(with_stack=True, profile_memory=True) as prof:
-            # src: [batch_size, src_len]
-            # trg: [batch_size, trg_len]
 
-            src_mask = self.make_src_mask(src)
-            trg_mask = self.make_trg_mask(trg)
+        # src: [batch_size, src_len]
+        # trg: [batch_size, trg_len]
 
-            # src_mask: [batch_size, 1, 1, src_len]
-            # trg_mask: [batch_size, 1, trg_len, trg_len]
-
-            enc_src = self.encoder(src, src_mask)
-            # enc_src: [batch_size, src_len, d_model]
-            output, attention = self.decoder(trg, enc_src, trg_mask, src_mask)
-            # output: [batch_size, trg_len, output_dim]
-            # attention: [batch_size, n_heads, trg_len, src_len]
-            print(prof.key_averages(group_by_stack_n=3).table(sort_by='self_cpu_time_total', row_limit=10))
-            return output, attention
+        src_mask = self.make_src_mask(src)
+        trg_mask = self.make_trg_mask(trg)
+        # src_mask: [batch_size, 1, 1, src_len]
+        # trg_mask: [batch_size, 1, trg_len, trg_len]
+        enc_src = self.encoder(src, src_mask)
+        # enc_src: [batch_size, src_len, d_model]
+        output, attention = self.decoder(trg, enc_src, trg_mask, src_mask)
+        # output: [batch_size, trg_len, output_dim]
+        # attention: [batch_size, n_heads, trg_len, src_len]
+        return output, attention
 
     def training_step(self, batch, batch_idx):
         x, y = batch
@@ -1459,17 +1456,19 @@ lr_monitor = LearningRateMonitor(logging_interval='step')
 nstep_check = CheckpointEveryNSteps(save_step_frequency=100000)
 
 max_steps = int(math.floor((len(train.examples) * hparams.n_epochs) / args.gpus))
-trainer = pl.Trainer(gpus=args.gpus,
-                     max_steps=max_steps,
-                     callbacks=[nstep_check, lr_monitor],
-                     val_check_interval=1,
-                     deterministic=True,
-					 accelerator="ddp",
-                     logger=logger,
-					 flush_logs_every_n_steps=1,
-                     log_every_n_steps=1,
-					 progress_bar_refresh_rate=20,
-					 plugins=DDPPlugin(find_unused_parameters=False),
-					 enable_pl_optimizer=False,
-                     precision=16)
-trainer.fit(model, train_loader, valid_loader)
+with profiler.profile(with_stack=True, profile_memory=True) as prof:
+    trainer = pl.Trainer(gpus=args.gpus,
+                         max_steps=max_steps,
+                         callbacks=[nstep_check, lr_monitor],
+                         val_check_interval=1,
+                         deterministic=True,
+                         accelerator="ddp",
+                         logger=logger,
+                         flush_logs_every_n_steps=1,
+                         log_every_n_steps=1,
+                         progress_bar_refresh_rate=20,
+                         plugins=DDPPlugin(find_unused_parameters=False),
+                         enable_pl_optimizer=False,
+                         precision=16)
+    trainer.fit(model, train_loader, valid_loader)
+print(prof.key_averages(group_by_stack_n=3).table(sort_by='self_cpu_time_total', row_limit=10))
