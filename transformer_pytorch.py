@@ -15,6 +15,7 @@ import torch
 import torch.optim as optim
 import torch.nn as nn
 from torch.utils.data import DataLoader, BatchSampler, RandomSampler, Sampler
+import torch.autograd.profiler as profiler
 # from torch.utils.tensorboard import SummaryWriter
 
 import pytorch_lightning as pl
@@ -290,9 +291,9 @@ print(f"data example : {vars(train.examples[0])['src']}, {vars(train.examples[0]
 print(f"time : {m}m {s}s")
 sys.stdout.flush()
 
-train_loader = DataLoader(train_ds, batch_size=hparams.batch_size, num_workers=0, pin_memory=True)
-valid_loader = DataLoader(valid_ds, batch_size=hparams.batch_size, num_workers=0, pin_memory=True)
-test_loader = DataLoader(test_ds, batch_size=hparams.batch_size, num_workers=0, pin_memory=True)
+train_loader = DataLoader(train_ds, batch_size=hparams.batch_size, num_workers=8, pin_memory=True)
+valid_loader = DataLoader(valid_ds, batch_size=hparams.batch_size, num_workers=8, pin_memory=True)
+test_loader = DataLoader(test_ds, batch_size=hparams.batch_size, num_workers=8, pin_memory=True)
 
 # example
 # for i, batch in enumerate(dataloader):
@@ -389,7 +390,8 @@ class PositionalEncoding(pl.LightningModule):
         x_len = x.shape[1]
         # sinusoid_table = self.sinusoid_table.type_as(x)
         with torch.no_grad():
-            result = torch.add(x, self.sinusoid_table[:x_len, :])
+            with profiler.record_function("POSITIONAL ENCODING"):
+                result = torch.add(x, self.sinusoid_table[:x_len, :])
         # del sinusoid_table
         return result
 
@@ -440,36 +442,37 @@ class MultiHeadAttentionLayer(pl.LightningModule):
         self.scale = torch.sqrt(torch.FloatTensor([self.d_k]))
 
     def forward(self, query, key, value, mask=None):
-        batch_size = query.shape[0]
-        Q = self.w_q(query)
-        K = self.w_k(key)
-        V = self.w_v(value)
+        with profiler.record_function("MultiHeadAttentionLayer"):
+            batch_size = query.shape[0]
+            Q = self.w_q(query)
+            K = self.w_k(key)
+            V = self.w_v(value)
 
-        # make seperate heads
-        Q = Q.view(batch_size, -1, self.n_heads, self.d_k).permute(0,2,1,3)
-        K = K.view(batch_size, -1, self.n_heads, self.d_k).permute(0,2,1,3)
-        V = V.view(batch_size, -1, self.n_heads, self.d_k).permute(0,2,1,3)
+            # make seperate heads
+            Q = Q.view(batch_size, -1, self.n_heads, self.d_k).permute(0,2,1,3)
+            K = K.view(batch_size, -1, self.n_heads, self.d_k).permute(0,2,1,3)
+            V = V.view(batch_size, -1, self.n_heads, self.d_k).permute(0,2,1,3)
 
-        self.scale = self.scale.type_as(query)
-        similarity = torch.matmul(Q, K.permute(0,1,3,2)) / self.scale
-        # similarity: [batch_size, n_heads, query_len, key_len]
+            self.scale = self.scale.type_as(query)
+            similarity = torch.matmul(Q, K.permute(0,1,3,2)) / self.scale
+            # similarity: [batch_size, n_heads, query_len, key_len]
 
-        if mask is not None:
-            similarity = similarity.masked_fill(mask==0, -1e10)
+            if mask is not None:
+                similarity = similarity.masked_fill(mask==0, -1e10)
 
-        similarity_norm = torch.softmax(similarity, dim=-1)
+            similarity_norm = torch.softmax(similarity, dim=-1)
 
-        # dot product attention
-        x = torch.matmul(self.dropout(similarity_norm), V)
+            # dot product attention
+            x = torch.matmul(self.dropout(similarity_norm), V)
 
-        # x: [batch_size, n_heads, query_len, key_len]
-        x = x.permute(0, 2, 1, 3).contiguous()
-        # x: [batch_size, query_len, n_heads, d_v]
-        x = x.view(batch_size, -1, self.d_model)
-        # x: [batch_size, query_len, d_model]
-        x = self.w_o(x)
-        # x: [batch_size, query_len, d_model]
-        return x, similarity_norm
+            # x: [batch_size, n_heads, query_len, key_len]
+            x = x.permute(0, 2, 1, 3).contiguous()
+            # x: [batch_size, query_len, n_heads, d_v]
+            x = x.view(batch_size, -1, self.d_model)
+            # x: [batch_size, query_len, d_model]
+            x = self.w_o(x)
+            # x: [batch_size, query_len, d_model]
+            return x, similarity_norm
 
     def training_step(self, batch, batch_idx):
         try:
@@ -503,12 +506,13 @@ class PositionwiseFeedforwardLayer(pl.LightningModule):
         self.dropout = nn.Dropout(dropout_ratio)
 
     def forward(self, x):
-        # x: [batch_size, seq_len, d_model]
-        x = self.dropout(torch.relu(self.w_ff1(x)))
-        # x: [batch_size, seq_len, d_ff]
-        x = self.w_ff2(x)
-        # x: [batch_size, seq_len, d_model]
-        return x
+        with profiler.record_function("PositionwiseFeedforwardLayer"):
+            # x: [batch_size, seq_len, d_model]
+            x = self.dropout(torch.relu(self.w_ff1(x)))
+            # x: [batch_size, seq_len, d_ff]
+            x = self.w_ff2(x)
+            # x: [batch_size, seq_len, d_model]
+            return x
 
     def training_step(self, batch, batch_idx):
         x = batch
@@ -548,17 +552,17 @@ class TransformerEncoderLayer(pl.LightningModule):
         self.dropout = nn.Dropout(dropout_ratio)
 
     def forward(self, src, src_mask):
+        with profiler.record_function("TransformerEncoderLayer"):
+            # src: [batch_size, src_len, d_model]
+            # src_mask: [batch_size, src_len]
 
-        # src: [batch_size, src_len, d_model]
-        # src_mask: [batch_size, src_len]
+            attn_src, _ = self.self_attn_layer(src, src, src, src_mask)
+            attn_add_norm_src = self.self_attn_layer_norm(src + self.dropout(attn_src))
 
-        attn_src, _ = self.self_attn_layer(src, src, src, src_mask)
-        attn_add_norm_src = self.self_attn_layer_norm(src + self.dropout(attn_src))
+            ff_src = self.positionwise_ff_layer(attn_add_norm_src)
+            ff_add_norm_src = self.positionwise_ff_layer_norm(self.dropout(attn_add_norm_src) + ff_src)
 
-        ff_src = self.positionwise_ff_layer(attn_add_norm_src)
-        ff_add_norm_src = self.positionwise_ff_layer_norm(self.dropout(attn_add_norm_src) + ff_src)
-
-        return ff_add_norm_src
+            return ff_add_norm_src
 
     def training_step(self, batch, batch_idx):
         x, y = batch
@@ -602,22 +606,23 @@ class TransformerEncoder(pl.LightningModule):
         self.scale = torch.sqrt(torch.FloatTensor([d_k]))
 
     def forward(self, src, src_mask):
-        batch_size =src.shape[0]
-        src_len = src.shape[1]
+        with profiler.record_function("TransformerEncoder"):
+            batch_size =src.shape[0]
+            src_len = src.shape[1]
 
-        '''to map position index information'''
+            '''to map position index information'''
 
-        # pos = torch.arange(0, src_len).unsqueeze(0).repeat(batch_size, 1).to(self.device)
-        src = self.dropout(self.tok_embedding(src))
-        # pe = get_sinusoid_encoding_table(src_len, src.shape[2], self.device)
-        # +positional encoding
-        src = self.positional_encoding(src)
-        # del pe
-        # src: [batch_size, src_len, d_model]
-        for layer in self.layers:
-            src = layer(src, src_mask)
+            # pos = torch.arange(0, src_len).unsqueeze(0).repeat(batch_size, 1).to(self.device)
+            src = self.dropout(self.tok_embedding(src))
+            # pe = get_sinusoid_encoding_table(src_len, src.shape[2], self.device)
+            # +positional encoding
+            src = self.positional_encoding(src)
+            # del pe
+            # src: [batch_size, src_len, d_model]
+            for layer in self.layers:
+                src = layer(src, src_mask)
 
-        return src
+            return src
 
     def training_step(self, batch, batch_idx):
         x, y = batch
@@ -668,19 +673,20 @@ class TransformerDecoderLayer(pl.LightningModule):
         self.dropout = nn.Dropout(dropout_ratio)
 
     def forward(self, trg, enc_src, trg_mask, src_mask):
-        # trg: [batch_size, trg_len, d_model]
-        # enc_src: [batch_size, src_len, d_model]
-        # trg_mask: [batch_size, trg_len]
-        # enc_mask: [batch_size, src_len]
+        with profiler.record_function("TransformerDecoderLayer"):
+            # trg: [batch_size, trg_len, d_model]
+            # enc_src: [batch_size, src_len, d_model]
+            # trg_mask: [batch_size, trg_len]
+            # enc_mask: [batch_size, src_len]
 
-        self_attn_trg, _ = self.self_attn_layer(trg, trg, trg, trg_mask)
-        self_attn_add_norm_trg = self.self_attn_layer_norm(trg + self.dropout(self_attn_trg))
-        enc_dec_attn_trg, attention = self.enc_dec_attn_layer(self_attn_add_norm_trg, enc_src, enc_src, src_mask)
-        enc_dec_add_norm_trg = self.enc_dec_attn_layer_norm(self_attn_add_norm_trg + self.dropout(enc_dec_attn_trg))
-        ff_trg = self.positionwise_ff_layer(enc_dec_add_norm_trg)
-        ff_add_norm_trg = self.positionwise_ff_layer_norm(enc_dec_add_norm_trg + self.dropout(ff_trg))
+            self_attn_trg, _ = self.self_attn_layer(trg, trg, trg, trg_mask)
+            self_attn_add_norm_trg = self.self_attn_layer_norm(trg + self.dropout(self_attn_trg))
+            enc_dec_attn_trg, attention = self.enc_dec_attn_layer(self_attn_add_norm_trg, enc_src, enc_src, src_mask)
+            enc_dec_add_norm_trg = self.enc_dec_attn_layer_norm(self_attn_add_norm_trg + self.dropout(enc_dec_attn_trg))
+            ff_trg = self.positionwise_ff_layer(enc_dec_add_norm_trg)
+            ff_add_norm_trg = self.positionwise_ff_layer_norm(enc_dec_add_norm_trg + self.dropout(ff_trg))
 
-        return ff_add_norm_trg, attention
+            return ff_add_norm_trg, attention
 
     def training_step(self, batch, batch_idx):
         x, y, tm, sm = batch
@@ -726,29 +732,30 @@ class TransformerDecoder(pl.LightningModule):
         self.scale = torch.sqrt(torch.FloatTensor([d_k]))
 
     def forward(self, trg, enc_src, trg_mask, src_mask):
-        batch_size = trg.shape[0]
-        trg_len = trg.shape[1]
+        with profiler.record_function("TransformerDecoder"):
+            batch_size = trg.shape[0]
+            trg_len = trg.shape[1]
 
-        # pos = torch.arange(0, trg_len).unsqueeze(0).repeat(batch_size, 1).to(self.device)
-        # pos: [batch_size, trg_len]
-        trg = self.dropout(self.tok_embedding(trg))
-        # pe = get_sinusoid_encoding_table(trg_len, trg.shape[2], self.device)
-        trg = self.positional_encoding(trg)
+            # pos = torch.arange(0, trg_len).unsqueeze(0).repeat(batch_size, 1).to(self.device)
+            # pos: [batch_size, trg_len]
+            trg = self.dropout(self.tok_embedding(trg))
+            # pe = get_sinusoid_encoding_table(trg_len, trg.shape[2], self.device)
+            trg = self.positional_encoding(trg)
 
-        # '''+positional encoding'''
-        # with torch.no_grad():
-        #     trg += sinusoid_encoding_table[:trg_len, :] 
+            # '''+positional encoding'''
+            # with torch.no_grad():
+            #     trg += sinusoid_encoding_table[:trg_len, :]
 
-        # del pe
-        # trg: [batch_size, trg_len, d_model]
+            # del pe
+            # trg: [batch_size, trg_len, d_model]
 
-        for layer in self.layers:
-            trg, attention = layer(trg, enc_src, trg_mask, src_mask)
+            for layer in self.layers:
+                trg, attention = layer(trg, enc_src, trg_mask, src_mask)
 
-        output = self.affine(trg)
-        # output: [batch_size, trg_len, output_len]
+            output = self.affine(trg)
+            # output: [batch_size, trg_len, output_len]
 
-        return output, attention
+            return output, attention
 
     def training_step(self, batch, batch_idx):
         x, y, tm, sm = batch
@@ -800,21 +807,23 @@ class Transformer(pl.LightningModule):
         return trg_mask
 
     def forward(self, src, trg):
-        # src: [batch_size, src_len]
-        # trg: [batch_size, trg_len]
+        with profiler.profile(with_stack=True, profile_memory=True) as prof:
+            # src: [batch_size, src_len]
+            # trg: [batch_size, trg_len]
 
-        src_mask = self.make_src_mask(src)
-        trg_mask = self.make_trg_mask(trg)
+            src_mask = self.make_src_mask(src)
+            trg_mask = self.make_trg_mask(trg)
 
-        # src_mask: [batch_size, 1, 1, src_len]
-        # trg_mask: [batch_size, 1, trg_len, trg_len]
+            # src_mask: [batch_size, 1, 1, src_len]
+            # trg_mask: [batch_size, 1, trg_len, trg_len]
 
-        enc_src = self.encoder(src, src_mask)
-        # enc_src: [batch_size, src_len, d_model]
-        output, attention = self.decoder(trg, enc_src, trg_mask, src_mask)
-        # output: [batch_size, trg_len, output_dim]
-        # attention: [batch_size, n_heads, trg_len, src_len]
-        return output, attention
+            enc_src = self.encoder(src, src_mask)
+            # enc_src: [batch_size, src_len, d_model]
+            output, attention = self.decoder(trg, enc_src, trg_mask, src_mask)
+            # output: [batch_size, trg_len, output_dim]
+            # attention: [batch_size, n_heads, trg_len, src_len]
+            print(prof.key_averages(group_by_stack_n=3).table(sort_by='self_cpu_time_total', row_limit=10))
+            return output, attention
 
     def training_step(self, batch, batch_idx):
         x, y = batch
@@ -907,19 +916,20 @@ class LabelSmoothingLoss(pl.LightningModule):
         self.ignore_index = ignore_index
 
     def forward(self, pred, target):
-        assert 0 <= self.smoothing < 1
-        result = None
-        pred = pred.log_softmax(dim=self.dim)
-        if self.weight is not None:
-            pred = pred * self.weight.unsqueeze(0)
+        with profiler.record_function("LabelSmoothingLoss"):
+            assert 0 <= self.smoothing < 1
+            result = None
+            pred = pred.log_softmax(dim=self.dim)
+            if self.weight is not None:
+                pred = pred * self.weight.unsqueeze(0)
 
-        with torch.enable_grad():
-            true_dist = torch.zeros_like(pred)
-            true_dist.fill_(self.smoothing / (self.cls - 1))
-            true_dist.scatter_(1, target.data.unsqueeze(1), self.confidence)
-            true_dist.masked_fill_((target == self.ignore_index).unsqueeze(1), 0)
-            true_len = len([i for i in target if i!=self.ignore_index])
-        return torch.sum(torch.sum(-true_dist * pred, dim=self.dim)) / true_len
+            with torch.enable_grad():
+                true_dist = torch.zeros_like(pred)
+                true_dist.fill_(self.smoothing / (self.cls - 1))
+                true_dist.scatter_(1, target.data.unsqueeze(1), self.confidence)
+                true_dist.masked_fill_((target == self.ignore_index).unsqueeze(1), 0)
+                true_len = len([i for i in target if i!=self.ignore_index])
+            return torch.sum(torch.sum(-true_dist * pred, dim=self.dim)) / true_len
 
 
     def training_step(self, batch, batch_idx, optimizer_idx):
