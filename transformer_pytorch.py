@@ -266,8 +266,8 @@ def pad_data(data):
     '''init token'''
     padded_trg = torch.cat((torch.tensor([[TRG.vocab.stoi[TRG.init_token]]] * len(data)), padded_trg), dim=1)
     max_len_sentence = max(max_len_sentence, len(padded_src[0]), len(padded_trg[0]))
-    # return [(s,t) for s,t in zip(padded_src, padded_trg)]
-    return padded_src, padded_trg
+    return [(s,t) for s,t in zip(padded_src, padded_trg)]
+    # return padded_src, padded_trg
 
 def chunker(data, batch_size):
     result = []
@@ -275,9 +275,9 @@ def chunker(data, batch_size):
        result += [pad_data(data[i:i+batch_size]) for i in range(i, i+batch_size)] 
     return result
 
-# train_ds = pad_data(train_ds)
-# valid_ds = pad_data(valid_ds)
-# test_ds = pad_data(test_ds)
+train_ds = pad_data(train_ds)
+valid_ds = pad_data(valid_ds)
+test_ds = pad_data(test_ds)
 
 et = utils.time.time()
 
@@ -290,9 +290,9 @@ print(f"data example : {vars(train.examples[0])['src']}, {vars(train.examples[0]
 print(f"time : {m}m {s}s")
 sys.stdout.flush()
 
-train_loader = DataLoader(train_ds, batch_size=hparams.batch_size, collate_fn=pad_data, num_workers=16, pin_memory=True)
-valid_loader = DataLoader(valid_ds, batch_size=hparams.batch_size, collate_fn=pad_data, num_workers=16, pin_memory=True)
-test_loader = DataLoader(test_ds, batch_size=hparams.batch_size, collate_fn=pad_data, num_workers=1, pin_memory=True)
+train_loader = DataLoader(train_ds, batch_size=hparams.batch_size, num_workers=0, pin_memory=True)
+valid_loader = DataLoader(valid_ds, batch_size=hparams.batch_size, num_workers=0, pin_memory=True)
+test_loader = DataLoader(test_ds, batch_size=hparams.batch_size, num_workers=0, pin_memory=True)
 
 # example
 # for i, batch in enumerate(dataloader):
@@ -410,8 +410,8 @@ class PositionalEncoding(pl.LightningModule):
                                                 lr_lambda=lambda steps:(hparams.d_model**(-0.5))*min((steps+1)**(-0.5), (steps+1)*hparams.warmup_steps**(-1.5)),
                                                 last_epoch=-1,
                                                 verbose=False)
-        # lr_scheduler = {'scheduler':scheduler, 'name':'base', 'interval':'step', 'frequency':1}
-        return [optimizer], [scheduler]
+        lr_scheduler = {'scheduler':scheduler, 'name':'lr-base', 'interval':'step', 'frequency':1}
+        return [optimizer], [lr_scheduler]
 
 '''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
 Self Attention
@@ -487,7 +487,8 @@ class MultiHeadAttentionLayer(pl.LightningModule):
                                                 last_epoch=-1,
                                                 verbose=False)
         # lr_scheduler = {'scheduler':scheduler, 'name':'my_log'}
-        return [optimizer], [scheduler]
+        lr_scheduler = {'scheduler':scheduler, 'name':'lr-base', 'interval':'step', 'frequency':1}
+        return [optimizer], [lr_scheduler]
 
 class PositionwiseFeedforwardLayer(pl.LightningModule):
     def __init__(self, d_model, d_ff, dropout_ratio):
@@ -521,7 +522,8 @@ class PositionwiseFeedforwardLayer(pl.LightningModule):
                                                 last_epoch=-1,
                                                 verbose=False)
         # lr_scheduler = {'scheduler':scheduler, 'name':'my_log'}
-        return [optimizer], [scheduler]
+        lr_scheduler = {'scheduler':scheduler, 'name':'lr-base', 'interval':'step', 'frequency':1}
+        return [optimizer], [lr_scheduler]
 
 '''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
 TransformerEncoderLayer
@@ -570,7 +572,8 @@ class TransformerEncoderLayer(pl.LightningModule):
                                                 last_epoch=-1,
                                                 verbose=False)
         # lr_scheduler = {'scheduler':scheduler, 'name':'my_log'}
-        return [optimizer], [scheduler]
+        lr_scheduler = {'scheduler':scheduler, 'name':'lr-base', 'interval':'step', 'frequency':1}
+        return [optimizer], [lr_scheduler]
 
 '''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
 TransformerEncoder
@@ -628,7 +631,8 @@ class TransformerEncoder(pl.LightningModule):
                                                 last_epoch=-1,
                                                 verbose=False)
         # lr_scheduler = {'scheduler':scheduler, 'name':'my_log'}
-        return [optimizer], [scheduler]
+        lr_scheduler = {'scheduler':scheduler, 'name':'lr-base', 'interval':'step', 'frequency':1}
+        return [optimizer], [lr_scheduler]
 
 
 '''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
@@ -690,7 +694,8 @@ class TransformerDecoderLayer(pl.LightningModule):
                                                 last_epoch=-1,
                                                 verbose=False)
         # lr_scheduler = {'scheduler':scheduler, 'name':'my_log'}
-        return [optimizer], [scheduler]
+        lr_scheduler = {'scheduler':scheduler, 'name':'lr-base', 'interval':'step', 'frequency':1}
+        return [optimizer], [lr_scheduler]
 
 
 '''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
@@ -757,7 +762,8 @@ class TransformerDecoder(pl.LightningModule):
                                                 last_epoch=-1,
                                                 verbose=False)
         # lr_scheduler = {'scheduler':scheduler, 'name':'my_log'}
-        return [optimizer], [scheduler]
+        lr_scheduler = {'scheduler':scheduler, 'name':'lr-base', 'interval':'step', 'frequency':1}
+        return [optimizer], [lr_scheduler]
 
 '''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
 Transformer
@@ -822,7 +828,8 @@ class Transformer(pl.LightningModule):
                                                 last_epoch=-1,
                                                 verbose=False)
         # lr_scheduler = {'scheduler':scheduler, 'name':'my_log'}
-        return [optimizer], [scheduler]
+        lr_scheduler = {'scheduler':scheduler, 'name':'lr-base', 'interval':'step', 'frequency':1}
+        return [optimizer], [lr_scheduler]
 
 '''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
 bleu score
@@ -1302,7 +1309,8 @@ class TrainModel(pl.LightningModule):
                                                 last_epoch=-1,
                                                 verbose=False)
         # lr_scheduler = {'scheduler':scheduler, 'name':'my_log'}
-        return [optimizer], [scheduler]
+        lr_scheduler = {'scheduler':scheduler, 'name':'lr-base', 'interval':'step', 'frequency':1}
+        return [optimizer], [lr_scheduler]
 
     def get_progress_bar_dict(self):
         tqdm_dict = super().get_progress_bar_dict()
@@ -1415,7 +1423,7 @@ class CheckpointEveryNSteps(pl.Callback):
     # def configure_ddp(self, model, device_ids):
     #     model = LightningDistributedDataParallel(model, device_ids, find_unused_parameters=False)
     #     return model
-
+    '''
     def on_batch_end(self, trainer: pl.Trainer, _):
         """ Check if we should save a checkpoint after every train batch """
         epoch = trainer.current_epoch
@@ -1429,6 +1437,7 @@ class CheckpointEveryNSteps(pl.Callback):
                 trainer.save_checkpoint(ckpt_path)
             # trainer.run_evaluation()
             # trainer.model.show_bleu_score(test, SRC, TRG)
+    '''
     # def on_epoch_end(self, trainer: pl.Trainer, _):
     #     global accumulate_loss
     #     accumulate_loss=0
@@ -1455,7 +1464,7 @@ trainer = pl.Trainer(gpus=args.gpus,
 					 flush_logs_every_n_steps=1,
                      log_every_n_steps=1,
                      profiler="pytorch",
-					 progress_bar_refresh_rate=0,
+					 progress_bar_refresh_rate=20,
 					 plugins=DDPPlugin(find_unused_parameters=False),
 					 enable_pl_optimizer=False,
                      precision=16)
